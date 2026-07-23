@@ -86,6 +86,9 @@ void test_ring_buffer_overflow_and_wrap() {
     std::vector<float> block(8 * 2, 0.5f);
     check(ring.push(block.data(), 8) == 8, "fills to capacity");
     check(ring.push(block.data(), 8) == 0, "drops when full (no overrun)");
+    check(ring.dropped_frames() == 8, "reports every dropped frame");
+    ring.reset_diagnostics();
+    check(ring.dropped_frames() == 0, "diagnostics can be reset for a new stream");
 
     std::vector<float> out(4 * 2, 0.0f);
     check(ring.pop(out.data(), 4) == 4, "drains half");

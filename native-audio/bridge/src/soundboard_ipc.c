@@ -11,6 +11,7 @@ static HANDLE g_mapping = NULL;
 static HANDLE g_audio_event = NULL;
 static HANDLE g_config_event = NULL;
 static SbSharedState* g_state = NULL;
+static SRWLOCK g_config_write_lock = SRWLOCK_INIT;
 
 static LONG clamp_milli(float value) {
     if (!isfinite(value)) {
@@ -141,10 +142,38 @@ int __cdecl sb_reset_session(void) {
     InterlockedExchange(&g_state->system_level_milli, 0);
     InterlockedExchange(&g_state->mix_level_milli, 0);
     InterlockedExchange(&g_state->underruns, 0);
+    InterlockedExchange(&g_state->capture_overruns, 0);
+    InterlockedExchange(&g_state->dropped_audio_frames, 0);
     InterlockedExchange(&g_state->latency_us, 0);
     InterlockedExchange64(&g_state->audio_read_frame, atomic_read64(&g_state->audio_write_frame));
     copy_wide(g_state->last_error, SB_ERROR_CAPACITY, L"");
     sb_touch_ui();
+    return 1;
+}
+
+int __cdecl sb_set_config(
+    const wchar_t* input_id,
+    const wchar_t* output_id,
+    const wchar_t* virtual_capture_id) {
+    if (g_state == NULL || input_id == NULL || output_id == NULL ||
+        virtual_capture_id == NULL) {
+        return 0;
+    }
+
+    AcquireSRWLockExclusive(&g_config_write_lock);
+    InterlockedIncrement(&g_state->config_sequence);
+    MemoryBarrier();
+    copy_wide(g_state->input_device_id, SB_DEVICE_ID_CAPACITY, input_id);
+    copy_wide(g_state->output_device_id, SB_DEVICE_ID_CAPACITY, output_id);
+    copy_wide(
+        g_state->virtual_capture_device_id,
+        SB_DEVICE_ID_CAPACITY,
+        virtual_capture_id);
+    MemoryBarrier();
+    InterlockedIncrement(&g_state->config_sequence);
+    InterlockedIncrement(&g_state->config_generation);
+    ReleaseSRWLockExclusive(&g_config_write_lock);
+    SetEvent(g_config_event);
     return 1;
 }
 
@@ -251,6 +280,11 @@ uint32_t __cdecl sb_push_audio(const float* samples, uint32_t frames, uint32_t c
             ? SB_AUDIO_CAPACITY_FRAMES
             : (write_frame - read_frame));
     accepted = frames < available ? frames : available;
+    if (accepted < frames) {
+        InterlockedExchangeAdd(
+            &g_state->dropped_audio_frames,
+            (LONG)(frames - accepted));
+    }
 
     for (frame = 0; frame < accepted; ++frame) {
         const uint32_t destination = (uint32_t)((write_frame + frame) % SB_AUDIO_CAPACITY_FRAMES) * 2u;
@@ -323,6 +357,9 @@ int __cdecl sb_get_status(SbStatus* status) {
     status->system_level = atomic_read(&g_state->system_level_milli) / 1000.0f;
     status->mixed_level = atomic_read(&g_state->mix_level_milli) / 1000.0f;
     status->underruns = (uint32_t)atomic_read(&g_state->underruns);
+    status->capture_overruns = (uint32_t)atomic_read(&g_state->capture_overruns);
+    status->dropped_audio_frames =
+        (uint32_t)atomic_read(&g_state->dropped_audio_frames);
     status->estimated_latency_ms = atomic_read(&g_state->latency_us) / 1000.0f;
     copy_wide(status->last_error, 256, g_state->last_error);
     return 1;
@@ -339,17 +376,32 @@ int __cdecl sb_get_config(
     if (g_state == NULL) {
         return 0;
     }
-    if (input_id != NULL) {
-        copy_wide(input_id, input_capacity, g_state->input_device_id);
-    }
-    if (output_id != NULL) {
-        copy_wide(output_id, output_capacity, g_state->output_device_id);
-    }
-    if (virtual_capture_id != NULL) {
-        copy_wide(
-            virtual_capture_id,
-            virtual_capture_capacity,
-            g_state->virtual_capture_device_id);
+    for (;;) {
+        LONG sequence_before;
+        LONG sequence_after;
+        sequence_before = atomic_read(&g_state->config_sequence);
+        if ((sequence_before & 1) != 0) {
+            SwitchToThread();
+            continue;
+        }
+        MemoryBarrier();
+        if (input_id != NULL) {
+            copy_wide(input_id, input_capacity, g_state->input_device_id);
+        }
+        if (output_id != NULL) {
+            copy_wide(output_id, output_capacity, g_state->output_device_id);
+        }
+        if (virtual_capture_id != NULL) {
+            copy_wide(
+                virtual_capture_id,
+                virtual_capture_capacity,
+                g_state->virtual_capture_device_id);
+        }
+        MemoryBarrier();
+        sequence_after = atomic_read(&g_state->config_sequence);
+        if (sequence_before == sequence_after && (sequence_after & 1) == 0) {
+            break;
+        }
     }
     if (generation != NULL) {
         *generation = (uint32_t)atomic_read(&g_state->config_generation);
@@ -411,6 +463,7 @@ void __cdecl sb_engine_set_levels(
     float system_level,
     float mixed_level,
     uint32_t underruns,
+    uint32_t capture_overruns,
     float estimated_latency_ms) {
     if (g_state == NULL) {
         return;
@@ -419,6 +472,7 @@ void __cdecl sb_engine_set_levels(
     InterlockedExchange(&g_state->system_level_milli, clamp_level(system_level));
     InterlockedExchange(&g_state->mix_level_milli, clamp_level(mixed_level));
     InterlockedExchange(&g_state->underruns, (LONG)underruns);
+    InterlockedExchange(&g_state->capture_overruns, (LONG)capture_overruns);
     InterlockedExchange(
         &g_state->latency_us,
         (LONG)(fmaxf(0.0f, fminf(estimated_latency_ms, 1000.0f)) * 1000.0f + 0.5f));

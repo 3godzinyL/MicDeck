@@ -1,10 +1,13 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
-  rmSync
+  rmSync,
+  writeFileSync
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, join, resolve } from 'node:path';
@@ -52,6 +55,21 @@ function runTauri(args) {
   }
 }
 
+function updateReleaseChecksums() {
+  const artifactNames = ['MicDeck-portable.exe', 'MicDeck-Setup.exe'];
+  const lines = artifactNames
+    .map((name) => ({ name, path: join(releaseDir, name) }))
+    .filter(({ path }) => existsSync(path))
+    .map(({ name, path }) => {
+      const digest = createHash('sha256').update(readFileSync(path)).digest('hex');
+      return `${digest}  ${name}`;
+    });
+
+  if (lines.length > 0) {
+    writeFileSync(join(releaseDir, 'SHA256SUMS.txt'), `${lines.join('\n')}\n`, 'utf8');
+  }
+}
+
 function copyPortable() {
   const source = join(rustReleaseDir, 'micdeck.exe');
   const destination = join(releaseDir, 'MicDeck-portable.exe');
@@ -59,6 +77,7 @@ function copyPortable() {
   mkdirSync(releaseDir, { recursive: true });
   copyFileSync(source, destination);
   copyFileSync(source, rootDestination);
+  updateReleaseChecksums();
   console.log(`\nGotowe: ${destination}`);
   console.log(`Kopia:  ${rootDestination}`);
 }
@@ -88,6 +107,7 @@ function copyInstaller() {
   const destination = join(releaseDir, 'MicDeck-Setup.exe');
   mkdirSync(releaseDir, { recursive: true });
   copyFileSync(source, destination);
+  updateReleaseChecksums();
   console.log(`\nGotowe: ${destination}`);
   console.log(`Źródło: ${basename(source)}`);
 }

@@ -161,11 +161,11 @@ This section is deliberately explicit. These are preview boundaries, not hidden 
 
 | Area | What v0.1 currently does |
 | --- | --- |
-| System capture | Captures the complete default Windows render mix. Per-application capture is planned, not implemented. |
+| System capture | Captures the complete default Windows render mix. Studio continuously discovers applications that emitted audio, keeps recent activity, and controls each Windows audio session independently. |
 | WASAPI mode | Uses adaptive shared mode. Exclusive-mode access is not claimed. |
 | Monitoring | Local sound-pad monitoring is muted while system-audio broadcast is active to prevent a feedback loop. The outgoing virtual mix still contains the pads. |
 | Device changes | Engine state and errors are visible in Studio and Settings. A manual **Restart audio engine** action is available when a device or driver is reconfigured. |
-| Default-device restoration | Previous capture defaults are restored on a normal MicDeck/engine shutdown when the managed endpoint is still active. A forced process termination, Windows crash, or power loss cannot guarantee restoration; verify the Windows input afterward. |
+| Default microphone | MicDeck no longer overwrites the Windows default input automatically. Settings includes an explicit repair action that restores the selected physical microphone for Console, Multimedia, and Communications roles. |
 | DSP | The preview provides gain control and soft saturation. It does not yet include VST hosting, noise suppression, a noise gate, or a full mastering chain. |
 | Distribution | Binaries and checksums are published, but Authenticode signing and automatic updates remain roadmap items. |
 | Architecture | Windows x64 only. No macOS, Linux, ARM64, mobile remote, Stream Deck, or MIDI support is claimed in this release. |
@@ -272,7 +272,7 @@ docs/                   Screenshots, release notes, and launch artwork
 ## Roadmap
 
 - [ ] Per-application audio capture
-- [ ] Device-change recovery and stronger crash-safe default-device restoration
+- [ ] Automatic recovery when a physical audio device is unplugged and reconnected
 - [ ] Normalization, threshold limiter, and lightweight EQ
 - [ ] Multiple decks and profiles
 - [ ] Stream Deck and MIDI control

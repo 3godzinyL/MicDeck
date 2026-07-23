@@ -88,7 +88,7 @@ fi
 # ---------------------------------------------------------------------------
 section "Bridge / engine — żywy probe IPC (wymaga audio)"
 if have cargo; then
-  if (cd src-tauri && timeout 40 cargo run --quiet --example native_probe 2>&1 | tail -20 | sed 's/^/    /'); then
+  if (cd src-tauri && set -o pipefail && timeout 40 cargo run --quiet --example native_probe 2>&1 | tail -20 | sed 's/^/    /'); then
     ok "native_probe wystartował (most C ABI + shared memory odpowiadają)"
   else
     warn "native_probe nie dokończył — zależne od urządzeń audio / sterownika (na maszynie docelowej sprawdź w aplikacji)"

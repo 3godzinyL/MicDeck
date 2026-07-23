@@ -7,12 +7,17 @@ All notable MicDeck changes are documented here. The project follows
 
 ### Planned
 
-- Per-application audio capture
 - Hardware controller integrations
 - Signed builds and automatic updates
 
 ### Added
 
+- Live Studio application-audio activity rack with recency sorting, executable icons,
+  live signal meters, and per-session volume controls
+- Continuous low-overhead Core Audio session monitoring, including recent activity
+  history for minimized and temporarily silent applications
+- Windows default microphone repair action for all capture roles
+- Native capture overrun and dropped-frame diagnostics
 - Persistent per-sound global hotkeys with an in-app shortcut recorder
 - Responsive background workers for local imports, URL downloads, decoding, and waveform analysis
 - Live import progress with immediate library refresh when prepared audio is ready
@@ -21,8 +26,24 @@ All notable MicDeck changes are documented here. The project follows
 
 ### Changed
 
+- Native audio protocol upgraded to version 5 with atomic configuration snapshots
+- Native bootstrap no longer installs drivers or changes the Windows default
+  microphone during application startup
+- Expensive native initialization now runs outside the UI startup path
+- Production binaries use additional MSVC control-flow, stack, DEP, ASLR, and
+  link-time optimization hardening
+- The Windows installer embeds the small WebView2 bootstrapper instead of the
+  complete offline runtime
+- Tauri now uses a restrictive Content Security Policy
 - Sound metadata analysis no longer blocks startup, playback, or the main UI thread
 - Library cards and primary surfaces now use the refreshed translucent MicDeck visual system
+
+### Fixed
+
+- Persisted configuration replacement is now atomic
+- Audio-ring and IPC buffer loss is observable instead of being silently discarded
+- Loopback startup warnings are retained and exposed to diagnostics
+- Native live-probe failures now propagate through the diagnostic script
 
 ## [0.1.0] — 2026-07-23
 

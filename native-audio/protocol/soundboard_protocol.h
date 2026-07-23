@@ -4,16 +4,16 @@
 #include <stdint.h>
 
 #define SB_PROTOCOL_MAGIC 0x53424155u
-#define SB_PROTOCOL_VERSION 4u
+#define SB_PROTOCOL_VERSION 5u
 #define SB_SAMPLE_RATE 48000u
 #define SB_CHANNELS 2u
 #define SB_AUDIO_CAPACITY_FRAMES (SB_SAMPLE_RATE * 2u)
 #define SB_DEVICE_ID_CAPACITY 512u
 #define SB_ERROR_CAPACITY 256u
 
-#define SB_MAPPING_NAME L"Local\\MicDeck.Audio.v4"
-#define SB_AUDIO_EVENT_NAME L"Local\\MicDeck.AudioData.v4"
-#define SB_CONFIG_EVENT_NAME L"Local\\MicDeck.Config.v4"
+#define SB_MAPPING_NAME L"Local\\MicDeck.Audio.v5"
+#define SB_AUDIO_EVENT_NAME L"Local\\MicDeck.AudioData.v5"
+#define SB_CONFIG_EVENT_NAME L"Local\\MicDeck.Config.v5"
 
 enum SbEngineState {
     SB_ENGINE_STOPPED = 0,
@@ -29,6 +29,7 @@ typedef struct SbSharedState {
     volatile LONG engine_pid;
     volatile LONG shutdown_requested;
     volatile LONG config_generation;
+    volatile LONG config_sequence;
     volatile LONG mic_gain_milli;
     volatile LONG sound_gain_milli;
     volatile LONG monitor_gain_milli;
@@ -38,6 +39,8 @@ typedef struct SbSharedState {
     volatile LONG system_level_milli;
     volatile LONG mix_level_milli;
     volatile LONG underruns;
+    volatile LONG capture_overruns;
+    volatile LONG dropped_audio_frames;
     volatile LONG latency_us;
     volatile LONG ui_heartbeat_ms;
     volatile LONG engine_heartbeat_ms;

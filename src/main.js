@@ -32,6 +32,7 @@ const state = {
   monitorGain: 0,
   systemAudioEnabled: false,
   systemAudioGain: 0.85,
+  audioSessions: [],
   nativeAudio: {
     available: false,
     ready: false,
@@ -43,6 +44,8 @@ const state = {
     mixedLevel01: 0,
     estimatedLatencyMs: 0,
     underruns: 0,
+    captureOverruns: 0,
+    droppedAudioFrames: 0,
     error: null,
     runtime: 'C++ / WASAPI'
   },
@@ -61,6 +64,7 @@ const state = {
   isInstallingDriver: false,
   isRenamingMicrophone: false,
   isRestartingEngine: false,
+  isRepairingDefaultMicrophone: false,
   filter: '',
   urlInput: '',
   mediaPlatform: 'auto',
@@ -83,7 +87,9 @@ const state = {
 };
 
 let playbackTimer = null;
+let audioSessionTimer = null;
 let toastTimer = null;
+const sessionVolumeTimers = new Map();
 let renderedLiveId = null;
 let newestSoundIds = new Set();
 let glowFrame = null;
@@ -421,6 +427,9 @@ async function setupLibraryWorkerEvents() {
     state.libraryWorker = payload;
     if (state.activeView === 'library') render();
   });
+  await listen('native-runtime-ready', () => {
+    refreshState().catch(() => {});
+  });
 }
 
 async function refreshState() {
@@ -437,6 +446,7 @@ async function refreshState() {
     playback,
     virtualAudio,
     nativeAudio,
+    audioSessions,
     autostartEnabled
   ] = await Promise.all([
     invoke('list_sounds'),
@@ -451,6 +461,7 @@ async function refreshState() {
     invoke('get_playback_status'),
     invoke('get_virtual_audio_status'),
     invoke('get_native_audio_status'),
+    invoke('list_audio_sessions'),
     isEnabled().catch(() => false)
   ]);
 
@@ -467,6 +478,7 @@ async function refreshState() {
     playback,
     virtualAudio,
     nativeAudio,
+    audioSessions,
     autostartEnabled: Boolean(autostartEnabled)
   });
   if (!state.microphoneNameDirty) {
@@ -664,6 +676,43 @@ async function restartNativeAudioEngine() {
     render();
     showToast(error, 'error');
   }
+}
+
+async function repairDefaultMicrophone() {
+  if (state.isRepairingDefaultMicrophone) return;
+  state.isRepairingDefaultMicrophone = true;
+  render();
+  try {
+    const name = await invoke('repair_default_microphone');
+    state.isRepairingDefaultMicrophone = false;
+    render();
+    showToast(t('toast.microphoneRepaired', { name }), 'success');
+  } catch (error) {
+    state.isRepairingDefaultMicrophone = false;
+    render();
+    showToast(error, 'error');
+  }
+}
+
+function setAudioSessionVolume(id, rawVolume) {
+  const volume = Math.max(0, Math.min(1, Number(rawVolume)));
+  const session = state.audioSessions.find((item) => item.id === id);
+  if (session) {
+    session.volume = volume;
+    session.muted = volume <= 0.001;
+  }
+  const output = document.querySelector(`[data-session-volume-output="${id}"]`);
+  if (output) output.textContent = `${Math.round(volume * 100)}%`;
+
+  clearTimeout(sessionVolumeTimers.get(id));
+  sessionVolumeTimers.set(id, setTimeout(async () => {
+    sessionVolumeTimers.delete(id);
+    try {
+      await invoke('set_audio_session_volume', { id, volume });
+    } catch (error) {
+      showToast(error, 'error');
+    }
+  }, 60));
 }
 
 function setLanguage(language) {
@@ -1058,6 +1107,74 @@ function gainControl(id, title, caption, value, max, step, valueClass, formatter
   `;
 }
 
+function audioSessionAgeLabel(milliseconds) {
+  const age = Number(milliseconds);
+  if (!Number.isFinite(age) || age < 3000) return t('studio.heardJustNow');
+  if (age < 60000) return t('studio.heardSeconds', { count: Math.max(1, Math.round(age / 1000)) });
+  return t('studio.heardMinutes', { count: Math.max(1, Math.round(age / 60000)) });
+}
+
+function audioSessionRack() {
+  const sessions = state.audioSessions.slice(0, 12);
+  return `
+    <div class="broadcast-source-rack">
+      <div class="source-rack-head">
+        <div>
+          <div class="panel-kicker">${t('studio.sourceRackKicker')}</div>
+          <h3>${t('studio.sourceRackTitle')}</h3>
+          <p>${t('studio.sourceRackDescription')}</p>
+        </div>
+        <span class="source-count">${sessions.length} ${t('studio.apps')}</span>
+      </div>
+      ${sessions.length ? `
+        <div class="audio-app-list">
+          ${sessions.map((session) => {
+            const volume = Math.max(0, Math.min(1, Number(session.volume || 0)));
+            const initial = (session.name || '?').trim().slice(0, 1).toUpperCase();
+            return `
+              <div class="audio-app-row ${session.active ? 'is-playing' : ''}" data-session-row="${session.id}">
+                <div class="audio-app-identity">
+                  <span class="audio-app-icon">
+                    ${session.iconDataUrl
+                      ? `<img src="${escapeHtml(session.iconDataUrl)}" alt="" />`
+                      : `<span>${escapeHtml(initial)}</span>`}
+                  </span>
+                  <div>
+                    <strong>${escapeHtml(session.name)}</strong>
+                    <small data-session-activity="${session.id}">${session.active ? t('studio.playingNow') : audioSessionAgeLabel(session.lastActiveMs)}</small>
+                  </div>
+                </div>
+                <div class="app-signal" aria-hidden="true">
+                  <i data-session-meter="${session.id}" style="width:${levelPercent(session.peakLevel01)}%"></i>
+                </div>
+                <div class="app-volume">
+                  <span>${t('studio.volume')}</span>
+                  <input
+                    class="range app-volume-range"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value="${volume}"
+                    data-session-volume="${session.id}"
+                    aria-label="${escapeHtml(`${session.name} — ${t('studio.volume')}`)}"
+                  />
+                  <output data-session-volume-output="${session.id}">${Math.round(volume * 100)}%</output>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      ` : `
+        <div class="audio-app-empty">
+          <span>${icon('monitor')}</span>
+          <div><strong>${t('studio.noAudioApps')}</strong><p>${t('studio.noAudioAppsHelp')}</p></div>
+        </div>
+      `}
+    </div>
+  `;
+}
+
 function studioView() {
   const live = state.systemAudioEnabled;
   return `
@@ -1068,7 +1185,7 @@ function studioView() {
       `<div class="latency-chip">${icon('bolt')} LOW LATENCY <strong>${latencyLabel()}</strong></div>`
     )}
 
-    <section class="broadcast-hero ${live ? 'is-broadcasting' : ''}">
+    <section class="broadcast-hero ${live ? 'is-broadcasting is-expanded' : ''}">
       <div class="broadcast-visual">
         <div class="broadcast-orbit orbit-one"></div>
         <div class="broadcast-orbit orbit-two"></div>
@@ -1092,6 +1209,7 @@ function studioView() {
         <strong class="system-meter-value">${levelPercent(state.nativeAudio.systemLevel01)}%</strong>
         <div class="vertical-meter"><i class="system-meter-fill" style="height:${levelPercent(state.nativeAudio.systemLevel01)}%"></i></div>
       </div>
+      ${live ? audioSessionRack() : ''}
     </section>
 
     <section class="signal-route">
@@ -1233,6 +1351,8 @@ function settingsView() {
           <div><span>${t('settings.bufferMode')}</span><strong>Adaptive low-latency</strong></div>
           <div><span>${t('settings.estimatedLatency')}</span><strong>${latencyLabel()}</strong></div>
           <div><span>XRUN / underrun</span><strong>${state.nativeAudio.underruns || 0}</strong></div>
+          <div><span>Capture overrun</span><strong>${state.nativeAudio.captureOverruns || 0}</strong></div>
+          <div><span>Dropped IPC frames</span><strong>${state.nativeAudio.droppedAudioFrames || 0}</strong></div>
         </div>
         ${state.nativeAudio.error ? `<div class="setup-callout compact">${icon('alert')}<div><strong>${t('settings.engineError')}</strong><p>${escapeHtml(state.nativeAudio.error)}</p></div></div>` : ''}
         <button class="button button-subtle full-button" id="restart-engine-btn" ${state.isRestartingEngine ? 'disabled' : ''}>
@@ -1275,6 +1395,17 @@ function settingsView() {
             </div>
             <button class="toggle-switch ${state.cursorGlowEnabled ? 'is-on' : ''}" id="cursor-glow-toggle" role="switch" aria-checked="${state.cursorGlowEnabled}" aria-label="${t('settings.cursorGlow')}">
               <i></i>
+            </button>
+          </div>
+          <div class="preference-row microphone-repair-row">
+            <span class="round-icon">${icon('mic')}</span>
+            <div>
+              <strong>${t('settings.repairMicrophone')}</strong>
+              <p>${t('settings.repairMicrophoneDescription')}</p>
+            </div>
+            <button class="button button-subtle repair-microphone-button" id="repair-microphone-btn" ${state.isRepairingDefaultMicrophone ? 'disabled' : ''}>
+              ${state.isRepairingDefaultMicrophone ? '<span class="spinner"></span>' : icon('refresh')}
+              ${t(state.isRepairingDefaultMicrophone ? 'settings.repairingMicrophone' : 'settings.repairMicrophoneAction')}
             </button>
           </div>
         </div>
@@ -1358,6 +1489,7 @@ function bindEvents() {
   document.getElementById('install-driver-btn')?.addEventListener('click', installVirtualAudioDriver);
   document.getElementById('rename-microphone-btn')?.addEventListener('click', renameVirtualMicrophone);
   document.getElementById('restart-engine-btn')?.addEventListener('click', restartNativeAudioEngine);
+  document.getElementById('repair-microphone-btn')?.addEventListener('click', repairDefaultMicrophone);
   document.getElementById('system-audio-toggle')?.addEventListener('click', toggleSystemAudio);
   document.getElementById('system-audio-cta')?.addEventListener('click', toggleSystemAudio);
   document.getElementById('autostart-toggle')?.addEventListener('click', toggleAutostart);
@@ -1373,6 +1505,10 @@ function bindEvents() {
     updateGain('set_monitor_gain', 'monitorGain', event.target.value, '.monitor-gain-value'));
   document.getElementById('system-gain-range')?.addEventListener('input', (event) =>
     updateGain('set_system_audio_gain', 'systemAudioGain', event.target.value, '.system-gain-value'));
+  document.querySelectorAll('[data-session-volume]').forEach((range) => {
+    range.addEventListener('input', (event) =>
+      setAudioSessionVolume(event.currentTarget.dataset.sessionVolume, event.currentTarget.value));
+  });
 
   document.querySelectorAll('[data-platform]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -1442,6 +1578,56 @@ function updateNativeAudioUi() {
   });
 }
 
+function audioSessionSignature(sessions) {
+  return sessions
+    .map((session) => `${session.id}:${session.name}:${session.iconDataUrl ? 1 : 0}`)
+    .join('|');
+}
+
+function updateAudioSessionsUi() {
+  if (state.activeView !== 'studio' || !state.systemAudioEnabled) return;
+  const rows = new Map(
+    [...document.querySelectorAll('[data-session-row]')]
+      .map((row) => [row.dataset.sessionRow, row])
+  );
+  state.audioSessions.forEach((session) => {
+    const row = rows.get(session.id);
+    if (!row) return;
+    row.classList.toggle('is-playing', Boolean(session.active));
+    const meter = row.querySelector('[data-session-meter]');
+    if (meter) meter.style.width = `${levelPercent(session.peakLevel01)}%`;
+    const activity = row.querySelector('[data-session-activity]');
+    if (activity) {
+      activity.textContent = session.active
+        ? t('studio.playingNow')
+        : audioSessionAgeLabel(session.lastActiveMs);
+    }
+    const range = row.querySelector('[data-session-volume]');
+    if (range && document.activeElement !== range && !sessionVolumeTimers.has(session.id)) {
+      range.value = String(Math.max(0, Math.min(1, Number(session.volume || 0))));
+    }
+    const output = row.querySelector('[data-session-volume-output]');
+    if (output && !sessionVolumeTimers.has(session.id)) {
+      output.textContent = `${Math.round(Math.max(0, Math.min(1, Number(session.volume || 0))) * 100)}%`;
+    }
+  });
+}
+
+async function pollAudioSessions() {
+  try {
+    const sessions = await invoke('list_audio_sessions');
+    const changed = audioSessionSignature(state.audioSessions) !== audioSessionSignature(sessions);
+    state.audioSessions = sessions;
+    if (changed && state.activeView === 'studio' && state.systemAudioEnabled) {
+      render();
+    } else {
+      updateAudioSessionsUi();
+    }
+  } catch {
+    // The engine can be unavailable briefly during a restart.
+  }
+}
+
 function updatePlaybackUi() {
   if (state.activeView !== 'library') return;
   const shouldLiveId = state.playback.isPlaying ? state.playback.soundId : null;
@@ -1487,7 +1673,10 @@ async function pollPlayback() {
 
 function startPlaybackPolling() {
   if (playbackTimer) return;
-  playbackTimer = setInterval(pollPlayback, 140);
+  playbackTimer = setInterval(pollPlayback, 180);
+  if (!audioSessionTimer) {
+    audioSessionTimer = setInterval(pollAudioSessions, 700);
+  }
 }
 
 window.addEventListener('keydown', captureShortcutKey, true);

@@ -15,6 +15,7 @@ public:
         const uint64_t read = read_frame_.load(std::memory_order_acquire);
         const uint32_t used = static_cast<uint32_t>(std::min<uint64_t>(write - read, capacity_));
         const uint32_t accepted = std::min(frames, capacity_ - used);
+        dropped_frames_.fetch_add(frames - accepted, std::memory_order_relaxed);
         for (uint32_t frame = 0; frame < accepted; ++frame) {
             const uint32_t target = static_cast<uint32_t>((write + frame) % capacity_) * 2u;
             samples_[target] = stereo_samples[frame * 2u];
@@ -42,10 +43,18 @@ public:
         read_frame_.store(write_frame_.load(std::memory_order_acquire), std::memory_order_release);
     }
 
+    uint64_t dropped_frames() const noexcept {
+        return dropped_frames_.load(std::memory_order_relaxed);
+    }
+
+    void reset_diagnostics() noexcept {
+        dropped_frames_.store(0, std::memory_order_relaxed);
+    }
+
 private:
     uint32_t capacity_;
     std::vector<float> samples_;
     std::atomic<uint64_t> write_frame_{0};
     std::atomic<uint64_t> read_frame_{0};
+    std::atomic<uint64_t> dropped_frames_{0};
 };
-

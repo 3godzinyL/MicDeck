@@ -56,6 +56,7 @@ public:
     AudioEngine();
     bool start(const std::wstring& input_id, const std::wstring& output_id, std::wstring& error);
     void stop();
+    const std::wstring& warning() const noexcept;
 
 private:
     void accept_microphone(const float* samples, uint32_t frames);
@@ -75,4 +76,5 @@ private:
     std::atomic<uint32_t> underruns_{0};
     std::atomic<bool> monitor_active_{false};
     std::atomic<float> estimated_latency_ms_{0.0f};
+    std::wstring warning_;
 };

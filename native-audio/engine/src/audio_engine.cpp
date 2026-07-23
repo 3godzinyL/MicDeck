@@ -419,7 +419,11 @@ bool AudioEngine::start(const std::wstring& input_id, const std::wstring& output
     microphone_peak_.store(0.0f);
     system_peak_.store(0.0f);
     underruns_.store(0);
+    microphone_.reset_diagnostics();
+    system_audio_.reset_diagnostics();
+    monitor_.reset_diagnostics();
     estimated_latency_ms_.store(0.0f);
+    warning_.clear();
 
     if (input_id.empty()) {
         error = L"Wybierz prawdziwy mikrofon w MicDeck.";
@@ -439,11 +443,15 @@ bool AudioEngine::start(const std::wstring& input_id, const std::wstring& output
     // System-audio loopback is best-effort. It stays warm while the engine is
     // running, so the UI toggle is instant and does not interrupt the mic.
     std::wstring system_capture_error;
-    system_capture_.start_loopback(
+    if (!system_capture_.start_loopback(
         [this](const float* samples, uint32_t frames) {
             accept_system_audio(samples, frames);
         },
-        system_capture_error);
+        system_capture_error)) {
+        warning_ = system_capture_error.empty()
+            ? L"System audio loopback is unavailable."
+            : system_capture_error;
+    }
 
     if (!render_.start(output_id, [this](float* destination, uint32_t frames) {
             render_mix(destination, frames);
@@ -482,7 +490,20 @@ void AudioEngine::stop() {
     capture_.stop();
     microphone_.clear();
     system_audio_.clear();
-    sb_engine_set_levels(0.0f, 0.0f, 0.0f, underruns_.load(), 0.0f);
+    const uint64_t capture_overruns =
+        microphone_.dropped_frames() + system_audio_.dropped_frames() +
+        monitor_.dropped_frames();
+    sb_engine_set_levels(
+        0.0f,
+        0.0f,
+        0.0f,
+        underruns_.load(),
+        static_cast<uint32_t>((std::min)(capture_overruns, uint64_t{UINT32_MAX})),
+        0.0f);
+}
+
+const std::wstring& AudioEngine::warning() const noexcept {
+    return warning_;
 }
 
 void AudioEngine::accept_microphone(const float* samples, uint32_t frames) {
@@ -562,6 +583,10 @@ void AudioEngine::render_mix(float* destination, uint32_t frames) {
             : 0.0f,
         mixed_peak,
         underruns_.load(std::memory_order_relaxed),
+        static_cast<uint32_t>((std::min)(
+            microphone_.dropped_frames() + system_audio_.dropped_frames() +
+                monitor_.dropped_frames(),
+            uint64_t{UINT32_MAX})),
         estimated_latency_ms_.load(std::memory_order_relaxed));
 }
 

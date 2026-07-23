@@ -29,8 +29,9 @@ Engine przechwytuje wybrany fizyczny mikrofon, opcjonalnie domyślne wyjście Wi
 - named mutex pozwala działać tylko jednemu engine;
 - UI wysyła heartbeat co 750 ms;
 - engine kończy się po żądaniu shutdown lub utracie UI;
-- przy starcie zapamiętuje domyślne endpointy Capture dla trzech ról Windows;
-- przy wyjściu przywraca rolę tylko wtedy, gdy nadal wskazuje na zarządzany endpoint;
-- status, poziomy, PID, XRUN i błędy są dostępne przez ABI DLL.
+- nie zmienia automatycznie domyślnego mikrofonu Windows;
+- udostępnia jawną naprawę endpointu dla `Console`, `Multimedia` i `Communications`;
+- monitoruje Core Audio Sessions, zachowuje wyłącznie aplikacje, które wydały dźwięk, i pobiera ich ikony bez wstrzykiwania kodu;
+- status, poziomy, PID, underruny, overruny i utracone ramki są dostępne przez ABI DLL.
 
 `src-tauri/build.rs` wykrywa MSVC przez `vswhere`, buduje `soundboard_ipc.dll` oraz `soundboard_audio_engine.exe`, po czym oba pliki zostają osadzone w głównym EXE Rust. W runtime są wypakowywane do wersjonowanego katalogu `%LOCALAPPDATA%\micdeck\native\<hash>`.

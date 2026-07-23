@@ -22,13 +22,31 @@ typedef struct SbStatus {
     float system_level;
     float mixed_level;
     uint32_t underruns;
+    uint32_t capture_overruns;
+    uint32_t dropped_audio_frames;
     float estimated_latency_ms;
     wchar_t last_error[256];
 } SbStatus;
 
+#define SB_AUDIO_SESSION_NAME_CAPACITY 128u
+
+typedef struct SbAudioSession {
+    uint64_t session_key;
+    float peak_level;
+    float volume;
+    int32_t muted;
+    int32_t active;
+    uint64_t last_active_age_ms;
+    wchar_t name[SB_AUDIO_SESSION_NAME_CAPACITY];
+} SbAudioSession;
+
 SB_API int __cdecl sb_open(int create_session);
 SB_API void __cdecl sb_close(void);
 SB_API int __cdecl sb_reset_session(void);
+SB_API int __cdecl sb_set_config(
+    const wchar_t* input_id,
+    const wchar_t* output_id,
+    const wchar_t* virtual_capture_id);
 SB_API int __cdecl sb_set_input_device(const wchar_t* endpoint_id);
 SB_API int __cdecl sb_set_output_device(const wchar_t* endpoint_id);
 SB_API int __cdecl sb_set_virtual_capture_device(const wchar_t* endpoint_id);
@@ -62,7 +80,22 @@ SB_API void __cdecl sb_engine_set_levels(
     float system_level,
     float mixed_level,
     uint32_t underruns,
+    uint32_t capture_overruns,
     float estimated_latency_ms);
+SB_API int __cdecl sb_start_audio_session_monitor(void);
+SB_API void __cdecl sb_stop_audio_session_monitor(void);
+SB_API uint32_t __cdecl sb_get_audio_sessions(SbAudioSession* sessions, uint32_t capacity);
+SB_API int __cdecl sb_set_audio_session_volume(uint64_t session_key, float volume);
+SB_API uint32_t __cdecl sb_get_audio_session_icon_rgba(
+    uint64_t session_key,
+    uint8_t* rgba,
+    uint32_t capacity,
+    uint32_t* width,
+    uint32_t* height);
+SB_API int __cdecl sb_repair_default_capture_endpoint(
+    const wchar_t* endpoint_id,
+    wchar_t* error,
+    uint32_t error_capacity);
 
 #ifdef __cplusplus
 }

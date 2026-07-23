@@ -125,11 +125,11 @@ Ta sekcja celowo opisuje granice wersji preview:
 
 | Obszar | Stan w v0.1 |
 | --- | --- |
-| Przechwytywanie systemu | Przechwytywany jest cały domyślny miks Windows. Wybór jednej aplikacji jest dopiero w planach. |
+| Przechwytywanie systemu | Przechwytywany jest cały domyślny miks Windows. Studio wykrywa aplikacje, które faktycznie wydały dźwięk, zachowuje historię aktywności i pozwala regulować ich sesje audio. |
 | Tryb WASAPI | Adaptacyjny shared mode; projekt nie deklaruje exclusive mode. |
 | Monitoring | Przy aktywnym udostępnianiu systemu lokalny odsłuch padów jest wyciszany, aby uniknąć pętli. Pady nadal trafiają do miksu wyjściowego. |
 | Zmiana urządzeń | Studio i Ustawienia pokazują stan oraz błędy silnika. Po zmianie konfiguracji dostępny jest ręczny restart silnika audio. |
-| Przywracanie urządzenia | Poprzednie domyślne wejście jest przywracane przy normalnym zamknięciu. Awaria Windows, utrata zasilania lub wymuszone ubicie procesu nie daje takiej gwarancji. |
+| Domyślny mikrofon | MicDeck nie nadpisuje już automatycznie domyślnego wejścia Windows. Ustawienia zawierają ręczną naprawę, która przywraca wybrany fizyczny mikrofon dla ról Console, Multimedia i Communications. |
 | DSP | Regulacja gainu i łagodna saturacja. Brak hosta VST, odszumiania, noise gate'a i pełnego chainu masteringowego. |
 | Dystrybucja | Buildy mają sumy kontrolne, ale nie mają jeszcze podpisu Authenticode ani automatycznych aktualizacji. |
 | Platformy | Windows x64. Brak deklarowanego wsparcia macOS, Linux, ARM64, Stream Deck i MIDI. |
