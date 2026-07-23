@@ -9,14 +9,16 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_global_shortcut::Shortcut;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SoundItem {
@@ -28,6 +30,8 @@ struct SoundItem {
     duration_ms: u64,
     #[serde(default)]
     meter_profile: Vec<u8>,
+    #[serde(default)]
+    shortcut: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +48,27 @@ struct SoundDto {
     duration_text: String,
     #[serde(rename = "sourceKind")]
     source_kind: String,
+    shortcut: Option<String>,
+}
+
+#[derive(Debug)]
+struct PreparedSound {
+    name: String,
+    path: String,
+    extension: String,
+    file_size: u64,
+    duration_ms: u64,
+    meter_profile: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LibraryWorkerProgressDto {
+    kind: &'static str,
+    stage: &'static str,
+    current: usize,
+    total: usize,
+    #[serde(rename = "fileName")]
+    file_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,22 +205,10 @@ impl NativeAudioRuntime {
 impl AppState {
     fn load() -> Self {
         let persisted = load_persisted_state().ok();
-        let mut sounds = persisted
+        let sounds = persisted
             .as_ref()
             .map(|p| p.sounds.clone())
             .unwrap_or_default();
-
-        for sound in &mut sounds {
-            if (sound.duration_ms == 0 || sound.meter_profile.is_empty())
-                && Path::new(&sound.path).exists()
-            {
-                if let Ok((duration_ms, meter_profile)) = analyze_audio_file(Path::new(&sound.path))
-                {
-                    sound.duration_ms = duration_ms;
-                    sound.meter_profile = meter_profile;
-                }
-            }
-        }
 
         let next_id = sounds
             .iter()
@@ -508,6 +521,7 @@ fn to_sound_dto(item: &SoundItem) -> SoundDto {
         file_size_text: file_size_text(item.file_size),
         duration_text: format_duration(item.duration_ms),
         source_kind: source_kind.to_string(),
+        shortcut: item.shortcut.clone(),
     }
 }
 
@@ -1024,30 +1038,62 @@ fn device_to_dto(device: &cpal::Device) -> DeviceDto {
     DeviceDto { id, raw_id, name }
 }
 
-fn add_sound_path(app: &mut AppState, path: PathBuf) -> Result<(), String> {
+fn prepare_sound_path(path: PathBuf) -> Result<PreparedSound, String> {
     if !path.exists() || !path.is_file() {
         return Err("Plik nie istnieje albo nie jest plikiem audio".into());
     }
 
     let normalized = path.to_string_lossy().to_string();
-    if app.sounds.iter().any(|s| s.path == normalized) {
-        return Ok(());
-    }
-
     let (duration_ms, meter_profile) = analyze_audio_file(&path)?;
     let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
-    let item = SoundItem {
-        id: app.next_id.to_string(),
+
+    Ok(PreparedSound {
         name: file_name_for_path(&path),
         path: normalized,
         extension: extension_for_path(&path),
         file_size,
         duration_ms,
         meter_profile,
-    };
+    })
+}
+
+fn insert_prepared_sound(app: &mut AppState, sound: PreparedSound) -> bool {
+    if app.sounds.iter().any(|item| item.path == sound.path) {
+        return false;
+    }
+
+    app.sounds.push(SoundItem {
+        id: app.next_id.to_string(),
+        name: sound.name,
+        path: sound.path,
+        extension: sound.extension,
+        file_size: sound.file_size,
+        duration_ms: sound.duration_ms,
+        meter_profile: sound.meter_profile,
+        shortcut: None,
+    });
     app.next_id += 1;
-    app.sounds.push(item);
-    Ok(())
+    true
+}
+
+fn emit_library_progress(
+    app: &tauri::AppHandle,
+    kind: &'static str,
+    stage: &'static str,
+    current: usize,
+    total: usize,
+    file_name: Option<String>,
+) {
+    let _ = app.emit(
+        "library-worker-progress",
+        LibraryWorkerProgressDto {
+            kind,
+            stage,
+            current,
+            total,
+            file_name,
+        },
+    );
 }
 
 fn download_audio_to_library(url: &str) -> Result<PathBuf, String> {
@@ -1136,35 +1182,151 @@ fn list_sounds(state: tauri::State<'_, Mutex<AppState>>) -> Result<Vec<SoundDto>
 }
 
 #[tauri::command]
-fn add_sounds(
+async fn add_sounds(
     paths: Vec<String>,
-    state: tauri::State<'_, Mutex<AppState>>,
+    app_handle: tauri::AppHandle,
 ) -> Result<Vec<SoundDto>, String> {
-    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
-
-    for raw in paths {
-        let path = PathBuf::from(&raw);
-        let _ = add_sound_path(&mut app, path);
+    let total = paths.len();
+    if total == 0 {
+        let state = app_handle.state::<Mutex<AppState>>();
+        let app = state.lock().map_err(|_| "State lock error".to_string())?;
+        return Ok(app.sounds.iter().map(to_sound_dto).collect());
     }
 
+    emit_library_progress(&app_handle, "files", "queued", 0, total, None);
+    let worker_handle = app_handle.clone();
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .enumerate()
+            .map(|(index, raw)| {
+                let path = PathBuf::from(&raw);
+                emit_library_progress(
+                    &worker_handle,
+                    "files",
+                    "analyzing",
+                    index,
+                    total,
+                    Some(file_name_for_path(&path)),
+                );
+                let result = prepare_sound_path(path);
+                emit_library_progress(&worker_handle, "files", "analyzing", index + 1, total, None);
+                result
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| format!("Worker importu plików zakończył się błędem: {error}"))?;
+
+    let mut first_error = None;
+    let mut successful = Vec::new();
+    for result in prepared {
+        match result {
+            Ok(sound) => successful.push(sound),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    if successful.is_empty() {
+        emit_library_progress(&app_handle, "files", "failed", total, total, None);
+        return Err(first_error.unwrap_or_else(|| "Nie udało się dodać plików audio".into()));
+    }
+
+    emit_library_progress(&app_handle, "files", "finalizing", total, total, None);
+    let state = app_handle.state::<Mutex<AppState>>();
+    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+    for sound in successful {
+        insert_prepared_sound(&mut app, sound);
+    }
     app.persist()?;
-    Ok(app.sounds.iter().map(to_sound_dto).collect())
+    let sounds = app.sounds.iter().map(to_sound_dto).collect();
+    drop(app);
+    emit_library_progress(&app_handle, "files", "complete", total, total, None);
+    Ok(sounds)
 }
 
 #[tauri::command]
-fn import_from_url(
+async fn import_from_url(
     url: String,
-    state: tauri::State<'_, Mutex<AppState>>,
+    app_handle: tauri::AppHandle,
 ) -> Result<Vec<SoundDto>, String> {
-    let trimmed = url.trim();
+    let trimmed = url.trim().to_string();
     if trimmed.is_empty() {
         return Err("Wklej link do YouTube, Shorts albo TikToka".into());
     }
-    validate_media_url(trimmed)?;
+    validate_media_url(&trimmed)?;
 
-    let downloaded = download_audio_to_library(trimmed)?;
+    emit_library_progress(&app_handle, "url", "validating", 0, 1, None);
+    let worker_handle = app_handle.clone();
+    let worker_result = tauri::async_runtime::spawn_blocking(move || {
+        emit_library_progress(&worker_handle, "url", "downloading", 0, 1, None);
+        let downloaded = download_audio_to_library(&trimmed)?;
+        emit_library_progress(
+            &worker_handle,
+            "url",
+            "analyzing",
+            0,
+            1,
+            Some(file_name_for_path(&downloaded)),
+        );
+        prepare_sound_path(downloaded)
+    })
+    .await
+    .map_err(|error| format!("Worker Quick Capture zakończył się błędem: {error}"))?;
+
+    let prepared = match worker_result {
+        Ok(sound) => sound,
+        Err(error) => {
+            emit_library_progress(&app_handle, "url", "failed", 1, 1, None);
+            return Err(error);
+        }
+    };
+
+    emit_library_progress(&app_handle, "url", "finalizing", 1, 1, None);
+    let state = app_handle.state::<Mutex<AppState>>();
     let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
-    add_sound_path(&mut app, downloaded)?;
+    insert_prepared_sound(&mut app, prepared);
+    app.persist()?;
+    let sounds = app.sounds.iter().map(to_sound_dto).collect();
+    drop(app);
+    emit_library_progress(&app_handle, "url", "complete", 1, 1, None);
+    Ok(sounds)
+}
+
+#[tauri::command]
+fn set_sound_shortcut(
+    id: String,
+    shortcut: Option<String>,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<Vec<SoundDto>, String> {
+    let normalized = shortcut
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if let Some(value) = normalized.as_deref() {
+        Shortcut::from_str(value)
+            .map_err(|_| "Ta kombinacja klawiszy nie jest obsługiwana przez Windows".to_string())?;
+    }
+
+    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+    if let Some(value) = normalized.as_deref() {
+        if app.sounds.iter().any(|sound| {
+            sound.id != id
+                && sound
+                    .shortcut
+                    .as_deref()
+                    .is_some_and(|current| current.eq_ignore_ascii_case(value))
+        }) {
+            return Err("Ta kombinacja jest już przypisana do innego dźwięku".into());
+        }
+    }
+
+    let sound = app
+        .sounds
+        .iter_mut()
+        .find(|sound| sound.id == id)
+        .ok_or_else(|| "Nie znaleziono dźwięku".to_string())?;
+    sound.shortcut = normalized;
     app.persist()?;
     Ok(app.sounds.iter().map(to_sound_dto).collect())
 }
@@ -1289,31 +1451,40 @@ fn stop_playback(
 }
 
 #[tauri::command]
-fn play_sound(
-    id: String,
-    state: tauri::State<'_, Mutex<AppState>>,
-    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
-) -> Result<(), String> {
-    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+async fn play_sound(id: String, app_handle: tauri::AppHandle) -> Result<(), String> {
+    let mut sound = {
+        let state = app_handle.state::<Mutex<AppState>>();
+        let app = state.lock().map_err(|_| "State lock error".to_string())?;
+        app.sounds
+            .iter()
+            .find(|sound| sound.id == id)
+            .cloned()
+            .ok_or_else(|| "Nie znaleziono dźwięku".to_string())?
+    };
 
-    let sound_index = app
-        .sounds
-        .iter()
-        .position(|s| s.id == id)
-        .ok_or_else(|| "Nie znaleziono dźwięku".to_string())?;
-
-    let needs_analysis = app.sounds[sound_index].duration_ms == 0
-        || app.sounds[sound_index].meter_profile.is_empty();
+    let needs_analysis = sound.duration_ms == 0 || sound.meter_profile.is_empty();
     if needs_analysis {
-        let path = PathBuf::from(&app.sounds[sound_index].path);
-        let (duration_ms, meter_profile) = analyze_audio_file(&path)?;
-        app.sounds[sound_index].duration_ms = duration_ms;
-        app.sounds[sound_index].meter_profile = meter_profile;
-        let _ = app.persist();
+        let path = PathBuf::from(&sound.path);
+        let (duration_ms, meter_profile) =
+            tauri::async_runtime::spawn_blocking(move || analyze_audio_file(&path))
+                .await
+                .map_err(|error| format!("Worker analizy audio zakończył się błędem: {error}"))??;
+        sound.duration_ms = duration_ms;
+        sound.meter_profile = meter_profile;
+
+        let state = app_handle.state::<Mutex<AppState>>();
+        let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+        if let Some(saved) = app.sounds.iter_mut().find(|saved| saved.id == id) {
+            saved.duration_ms = sound.duration_ms;
+            saved.meter_profile = sound.meter_profile.clone();
+            let _ = app.persist();
+        }
     }
 
-    let sound = app.sounds[sound_index].clone();
+    let state = app_handle.state::<Mutex<AppState>>();
+    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
     app.playback = None;
+    let native = app_handle.state::<Mutex<NativeAudioRuntime>>();
     let native = native
         .lock()
         .map_err(|_| "Native audio lock error".to_string())?;
@@ -1356,6 +1527,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -1368,6 +1540,7 @@ pub fn run() {
             list_sounds,
             add_sounds,
             import_from_url,
+            set_sound_shortcut,
             remove_sound,
             list_output_devices,
             list_input_devices,
