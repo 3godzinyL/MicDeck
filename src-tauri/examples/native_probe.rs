@@ -14,9 +14,39 @@ struct RawStatus {
     engine_state: i32,
     engine_pid: u32,
     microphone_level: f32,
+    system_level: f32,
     mixed_level: f32,
     underruns: u32,
+    capture_overruns: u32,
+    dropped_audio_frames: u32,
+    estimated_latency_ms: f32,
     last_error: [u16; 256],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawAudioSession {
+    session_key: u64,
+    peak_level: f32,
+    volume: f32,
+    muted: i32,
+    active: i32,
+    last_active_age_ms: u64,
+    name: [u16; 128],
+}
+
+impl Default for RawAudioSession {
+    fn default() -> Self {
+        Self {
+            session_key: 0,
+            peak_level: 0.0,
+            volume: 0.0,
+            muted: 0,
+            active: 0,
+            last_active_age_ms: 0,
+            name: [0; 128],
+        }
+    }
 }
 
 impl Default for RawStatus {
@@ -27,8 +57,12 @@ impl Default for RawStatus {
             engine_state: 0,
             engine_pid: 0,
             microphone_level: 0.0,
+            system_level: 0.0,
             mixed_level: 0.0,
             underruns: 0,
+            capture_overruns: 0,
+            dropped_audio_frames: 0,
+            estimated_latency_ms: 0.0,
             last_error: [0; 256],
         }
     }
@@ -63,9 +97,22 @@ fn main() -> Result<(), String> {
         let push_audio: unsafe extern "C" fn(*const f32, u32, u32) -> u32 = *library
             .get(b"sb_push_audio\0")
             .map_err(|error| error.to_string())?;
+        let start_session_monitor: unsafe extern "C" fn() -> c_int = *library
+            .get(b"sb_start_audio_session_monitor\0")
+            .map_err(|error| error.to_string())?;
+        let stop_session_monitor: unsafe extern "C" fn() = *library
+            .get(b"sb_stop_audio_session_monitor\0")
+            .map_err(|error| error.to_string())?;
+        let get_audio_sessions: unsafe extern "C" fn(*mut RawAudioSession, u32) -> u32 = *library
+            .get(b"sb_get_audio_sessions\0")
+            .map_err(|error| error.to_string())?;
 
         if open(0) == 0 {
             return Err("Native audio session is not running".into());
+        }
+        if start_session_monitor() == 0 {
+            close();
+            return Err("Native audio session monitor did not start".into());
         }
 
         if command == "tone" {
@@ -91,23 +138,32 @@ fn main() -> Result<(), String> {
 
         let mut status = RawStatus::default();
         get_status(&mut status);
+        thread::sleep(Duration::from_millis(800));
+        let mut sessions = vec![RawAudioSession::default(); 64];
+        let session_count = get_audio_sessions(sessions.as_mut_ptr(), sessions.len() as u32);
         let error_length = status
             .last_error
             .iter()
             .position(|value| *value == 0)
             .unwrap_or(status.last_error.len());
         println!(
-            "dll={}\nprotocol={} connected={} state={} pid={} mic={:.3} mix={:.3} xruns={} error={}",
+            "dll={}\nprotocol={} connected={} state={} pid={} mic={:.3} system={:.3} mix={:.3} underruns={} overruns={} dropped={} latency_ms={:.2} sessions={} error={}",
             dll_path.display(),
             status.protocol_version,
             status.connected,
             status.engine_state,
             status.engine_pid,
             status.microphone_level,
+            status.system_level,
             status.mixed_level,
             status.underruns,
+            status.capture_overruns,
+            status.dropped_audio_frames,
+            status.estimated_latency_ms,
+            session_count,
             String::from_utf16_lossy(&status.last_error[..error_length])
         );
+        stop_session_monitor();
         close();
     }
     Ok(())

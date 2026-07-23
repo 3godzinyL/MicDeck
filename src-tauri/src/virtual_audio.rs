@@ -76,13 +76,10 @@ fn endpoint_if_vb_cable(device: cpal::Device) -> Option<AudioEndpoint> {
     })
 }
 
-#[cfg(not(debug_assertions))]
 pub fn bootstrap_driver() -> DriverBootstrap {
-    if driver_is_ready() || std::env::var_os("SOUNDBOARD_SKIP_DRIVER_INSTALL").is_some() {
-        return DriverBootstrap::default();
-    }
-
-    install_driver_now()
+    // Startup is detection-only. Driver installation is an explicit user
+    // action because it elevates privileges and may require a Windows restart.
+    DriverBootstrap::default()
 }
 
 pub fn install_driver_now() -> DriverBootstrap {
@@ -109,11 +106,6 @@ pub fn install_driver_now() -> DriverBootstrap {
 
     status.restart_required = true;
     status
-}
-
-#[cfg(debug_assertions)]
-pub fn bootstrap_driver() -> DriverBootstrap {
-    DriverBootstrap::default()
 }
 
 fn verify_embedded_driver() -> Result<(), String> {

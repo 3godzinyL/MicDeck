@@ -95,6 +95,7 @@ fn build_native_audio() {
         native_dir.join("engine/src/audio_engine.cpp"),
         native_dir.join("engine/src/default_endpoint.h"),
         native_dir.join("engine/src/default_endpoint.cpp"),
+        native_dir.join("bridge/src/windows_audio_control.cpp"),
         native_dir.join("engine/src/main.cpp"),
     ];
     for source in watched_sources {
@@ -107,22 +108,24 @@ fn build_native_audio() {
     let engine = out_dir.join("soundboard_audio_engine.exe");
 
     let bridge_command = format!(
-        "cl /nologo /O2 /W4 /DUNICODE /D_UNICODE /LD /I{} /I{} {} /link /OUT:{} /IMPLIB:{}",
+        "cl /nologo /O2 /GL /GS /sdl /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE /LD /I{} /I{} /I{} {} {} {} ole32.lib shell32.lib gdi32.lib user32.lib /link /LTCG /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /OUT:{} /IMPLIB:{}",
         quoted(&bridge_include),
         quoted(&protocol_include),
+        quoted(&engine_source),
         quoted(&bridge_source),
+        quoted(&native_dir.join("bridge/src/windows_audio_control.cpp")),
+        quoted(&engine_source.join("default_endpoint.cpp")),
         quoted(&dll),
         quoted(&import_library)
     );
     run_msvc(&vsdev, &out_dir, &bridge_command);
 
     let engine_command = format!(
-        "cl /nologo /O2 /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE /I{} /I{} {} {} {} {} ole32.lib avrt.lib /link /SUBSYSTEM:WINDOWS /OUT:{}",
+        "cl /nologo /O2 /GL /GS /sdl /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE /I{} /I{} {} {} {} ole32.lib avrt.lib /link /LTCG /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /SUBSYSTEM:WINDOWS /OUT:{}",
         quoted(&bridge_include),
         quoted(&engine_source),
         quoted(&engine_source.join("main.cpp")),
         quoted(&engine_source.join("audio_engine.cpp")),
-        quoted(&engine_source.join("default_endpoint.cpp")),
         quoted(&import_library),
         quoted(&engine)
     );

@@ -6,7 +6,7 @@ use rodio::{Decoder, Source};
 use serde::{Deserialize, Serialize};
 use std::f32;
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -95,10 +95,29 @@ struct NativeAudioStatusDto {
     #[serde(rename = "mixedLevel01")]
     mixed_level_01: f32,
     underruns: u32,
+    #[serde(rename = "captureOverruns")]
+    capture_overruns: u32,
+    #[serde(rename = "droppedAudioFrames")]
+    dropped_audio_frames: u32,
     #[serde(rename = "estimatedLatencyMs")]
     estimated_latency_ms: f32,
     error: Option<String>,
     runtime: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AudioSessionDto {
+    id: String,
+    name: String,
+    #[serde(rename = "peakLevel01")]
+    peak_level_01: f32,
+    volume: f32,
+    muted: bool,
+    active: bool,
+    #[serde(rename = "lastActiveMs")]
+    last_active_ms: u64,
+    #[serde(rename = "iconDataUrl")]
+    icon_data_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,10 +258,8 @@ impl AppState {
                 .as_ref()
                 .map(|p| clamp_monitor_gain(p.monitor_gain))
                 .unwrap_or_else(default_monitor_gain),
-            system_audio_enabled: persisted
-                .as_ref()
-                .map(|p| p.system_audio_enabled)
-                .unwrap_or(false),
+            // Broadcasting never resumes implicitly after a restart.
+            system_audio_enabled: false,
             system_audio_gain: persisted
                 .as_ref()
                 .map(|p| clamp_system_audio_gain(p.system_audio_gain))
@@ -281,7 +298,18 @@ impl AppState {
 
         let json = serde_json::to_string_pretty(&persisted)
             .map_err(|e| format!("Nie udało się zapisać JSON: {e}"))?;
-        fs::write(path, json).map_err(|e| format!("Nie udało się zapisać configu: {e}"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| "Nieprawidłowa ścieżka configu".to_string())?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| format!("Nie udało się utworzyć atomowego configu: {e}"))?;
+        temporary
+            .write_all(json.as_bytes())
+            .and_then(|_| temporary.as_file_mut().sync_all())
+            .map_err(|e| format!("Nie udało się utrwalić configu: {e}"))?;
+        temporary
+            .persist(&path)
+            .map_err(|e| format!("Nie udało się atomowo podmienić configu: {}", e.error))?;
         Ok(())
     }
 
@@ -981,6 +1009,8 @@ fn get_native_audio_status(
             system_level_01: 0.0,
             mixed_level_01: 0.0,
             underruns: 0,
+            capture_overruns: 0,
+            dropped_audio_frames: 0,
             estimated_latency_ms: 0.0,
             error: native.startup_error.clone(),
             runtime: "C++ / WASAPI",
@@ -1003,10 +1033,82 @@ fn get_native_audio_status(
         system_level_01: status.system_level.clamp(0.0, 1.5),
         mixed_level_01: status.mixed_level.clamp(0.0, 1.5),
         underruns: status.underruns,
+        capture_overruns: status.capture_overruns,
+        dropped_audio_frames: status.dropped_audio_frames,
         estimated_latency_ms: status.estimated_latency_ms.max(0.0),
         error: status.error.or_else(|| native.startup_error.clone()),
         runtime: "C++ / WASAPI",
     })
+}
+
+#[tauri::command]
+fn list_audio_sessions(
+    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
+) -> Result<Vec<AudioSessionDto>, String> {
+    let native = native
+        .lock()
+        .map_err(|_| "Native audio lock error".to_string())?;
+    let Some(engine) = native.engine.as_ref() else {
+        return Ok(Vec::new());
+    };
+    Ok(engine
+        .audio_sessions()
+        .into_iter()
+        .map(|session| AudioSessionDto {
+            id: session.id,
+            name: session.name,
+            peak_level_01: session.peak_level,
+            volume: session.volume,
+            muted: session.muted,
+            active: session.active,
+            last_active_ms: session.last_active_age_ms,
+            icon_data_url: session.icon_data_url,
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn set_audio_session_volume(
+    id: String,
+    volume: f32,
+    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
+) -> Result<(), String> {
+    if !volume.is_finite() {
+        return Err("Nieprawidłowa głośność aplikacji".into());
+    }
+    let native = native
+        .lock()
+        .map_err(|_| "Native audio lock error".to_string())?;
+    let engine = native.engine.as_ref().ok_or_else(|| {
+        native
+            .startup_error
+            .clone()
+            .unwrap_or_else(|| "C++ audio engine nie działa".into())
+    })?;
+    engine.set_audio_session_volume(&id, volume)
+}
+
+#[tauri::command]
+fn repair_default_microphone(
+    state: tauri::State<'_, Mutex<AppState>>,
+    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
+) -> Result<String, String> {
+    let input = {
+        let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+        resolve_physical_input(&mut app)?
+            .ok_or_else(|| "Nie znaleziono fizycznego mikrofonu do przywrócenia".to_string())?
+    };
+    let native = native
+        .lock()
+        .map_err(|_| "Native audio lock error".to_string())?;
+    let engine = native.engine.as_ref().ok_or_else(|| {
+        native
+            .startup_error
+            .clone()
+            .unwrap_or_else(|| "C++ audio engine nie działa".into())
+    })?;
+    engine.repair_default_capture(&input.raw_id)?;
+    Ok(input.name)
 }
 
 #[tauri::command]
@@ -1564,6 +1666,9 @@ pub fn run() {
             get_system_audio_gain,
             set_system_audio_gain,
             get_native_audio_status,
+            list_audio_sessions,
+            set_audio_session_volume,
+            repair_default_microphone,
             restart_native_audio_engine,
             play_sound,
             stop_playback,
@@ -1606,29 +1711,27 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("MicDeck");
                 let start_minimized = std::env::args().any(|arg| arg == "--minimized");
-                let hide_for_driver_setup = !cfg!(debug_assertions)
-                    && !virtual_audio::driver_is_ready()
-                    && std::env::var_os("SOUNDBOARD_SKIP_DRIVER_INSTALL").is_none();
-                if hide_for_driver_setup || start_minimized {
+                if start_minimized {
                     let _ = window.hide();
                 }
 
-                let driver_status = virtual_audio::bootstrap_driver();
-                if let Ok(mut state) = app.state::<Mutex<virtual_audio::DriverBootstrap>>().lock() {
-                    *state = driver_status;
-                }
-
-                if let (Ok(mut app_state), Ok(mut native_state)) = (
-                    app.state::<Mutex<AppState>>().lock(),
-                    app.state::<Mutex<NativeAudioRuntime>>().lock(),
-                ) {
-                    start_native_runtime(&mut app_state, &mut native_state);
-                }
-
-                if hide_for_driver_setup && !start_minimized {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let driver_status = virtual_audio::bootstrap_driver();
+                    if let Ok(mut state) = app_handle
+                        .state::<Mutex<virtual_audio::DriverBootstrap>>()
+                        .lock()
+                    {
+                        *state = driver_status;
+                    }
+                    if let (Ok(mut app_state), Ok(mut native_state)) = (
+                        app_handle.state::<Mutex<AppState>>().lock(),
+                        app_handle.state::<Mutex<NativeAudioRuntime>>().lock(),
+                    ) {
+                        start_native_runtime(&mut app_state, &mut native_state);
+                    }
+                    let _ = app_handle.emit("native-runtime-ready", ());
+                });
             }
             Ok(())
         })

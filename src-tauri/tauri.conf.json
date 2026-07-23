@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'",
       "capabilities": ["default"]
     }
   },
@@ -34,7 +34,8 @@
     ],
     "windows": {
       "webviewInstallMode": {
-        "type": "offlineInstaller"
+        "type": "embedBootstrapper",
+        "silent": true
       },
       "nsis": {
         "installMode": "currentUser",

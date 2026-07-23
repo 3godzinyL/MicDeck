@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use libloading::Library;
 use rodio::source::UniformSourceIterator;
 use rodio::Decoder;
@@ -25,7 +26,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 type OpenFn = unsafe extern "C" fn(c_int) -> c_int;
 type CloseFn = unsafe extern "C" fn();
 type ResetFn = unsafe extern "C" fn() -> c_int;
-type SetDeviceFn = unsafe extern "C" fn(*const u16) -> c_int;
+type SetConfigFn = unsafe extern "C" fn(*const u16, *const u16, *const u16) -> c_int;
 type SetGainsFn = unsafe extern "C" fn(f32, f32) -> c_int;
 type SetMonitorGainFn = unsafe extern "C" fn(f32) -> c_int;
 type SetSystemAudioFn = unsafe extern "C" fn(c_int, f32) -> c_int;
@@ -34,6 +35,12 @@ type ClearAudioFn = unsafe extern "C" fn();
 type GetStatusFn = unsafe extern "C" fn(*mut RawStatus) -> c_int;
 type TouchFn = unsafe extern "C" fn();
 type RequestShutdownFn = unsafe extern "C" fn();
+type StartSessionMonitorFn = unsafe extern "C" fn() -> c_int;
+type StopSessionMonitorFn = unsafe extern "C" fn();
+type GetAudioSessionsFn = unsafe extern "C" fn(*mut RawAudioSession, u32) -> u32;
+type SetAudioSessionVolumeFn = unsafe extern "C" fn(u64, f32) -> c_int;
+type GetAudioSessionIconFn = unsafe extern "C" fn(u64, *mut u8, u32, *mut u32, *mut u32) -> u32;
+type RepairDefaultCaptureFn = unsafe extern "C" fn(*const u16, *mut u16, u32) -> c_int;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -46,6 +53,8 @@ struct RawStatus {
     system_level: f32,
     mixed_level: f32,
     underruns: u32,
+    capture_overruns: u32,
+    dropped_audio_frames: u32,
     estimated_latency_ms: f32,
     last_error: [u16; 256],
 }
@@ -61,6 +70,8 @@ impl Default for RawStatus {
             system_level: 0.0,
             mixed_level: 0.0,
             underruns: 0,
+            capture_overruns: 0,
+            dropped_audio_frames: 0,
             estimated_latency_ms: 0.0,
             last_error: [0; 256],
         }
@@ -77,17 +88,55 @@ pub struct EngineStatus {
     pub system_level: f32,
     pub mixed_level: f32,
     pub underruns: u32,
+    pub capture_overruns: u32,
+    pub dropped_audio_frames: u32,
     pub estimated_latency_ms: f32,
     pub error: Option<String>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawAudioSession {
+    session_key: u64,
+    peak_level: f32,
+    volume: f32,
+    muted: i32,
+    active: i32,
+    last_active_age_ms: u64,
+    name: [u16; 128],
+}
+
+impl Default for RawAudioSession {
+    fn default() -> Self {
+        Self {
+            session_key: 0,
+            peak_level: 0.0,
+            volume: 1.0,
+            muted: 0,
+            active: 0,
+            last_active_age_ms: u64::MAX,
+            name: [0; 128],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioSession {
+    pub id: String,
+    pub name: String,
+    pub peak_level: f32,
+    pub volume: f32,
+    pub muted: bool,
+    pub active: bool,
+    pub last_active_age_ms: u64,
+    pub icon_data_url: Option<String>,
 }
 
 struct Bridge {
     _library: Library,
     close: CloseFn,
     reset: ResetFn,
-    set_input: SetDeviceFn,
-    set_output: SetDeviceFn,
-    set_virtual_capture: SetDeviceFn,
+    set_config: SetConfigFn,
     set_gains: SetGainsFn,
     set_monitor_gain: SetMonitorGainFn,
     set_system_audio: SetSystemAudioFn,
@@ -96,6 +145,12 @@ struct Bridge {
     get_status: GetStatusFn,
     touch_ui: TouchFn,
     request_shutdown: RequestShutdownFn,
+    start_session_monitor: StartSessionMonitorFn,
+    stop_session_monitor: StopSessionMonitorFn,
+    get_audio_sessions: GetAudioSessionsFn,
+    set_audio_session_volume: SetAudioSessionVolumeFn,
+    get_audio_session_icon: GetAudioSessionIconFn,
+    repair_default_capture: RepairDefaultCaptureFn,
 }
 
 impl Bridge {
@@ -113,15 +168,9 @@ impl Bridge {
             reset: *library
                 .get(b"sb_reset_session\0")
                 .map_err(|error| format!("Brak sb_reset_session w native DLL: {error}"))?,
-            set_input: *library
-                .get(b"sb_set_input_device\0")
-                .map_err(|error| format!("Brak sb_set_input_device w native DLL: {error}"))?,
-            set_output: *library
-                .get(b"sb_set_output_device\0")
-                .map_err(|error| format!("Brak sb_set_output_device w native DLL: {error}"))?,
-            set_virtual_capture: *library.get(b"sb_set_virtual_capture_device\0").map_err(
-                |error| format!("Brak sb_set_virtual_capture_device w native DLL: {error}"),
-            )?,
+            set_config: *library
+                .get(b"sb_set_config\0")
+                .map_err(|error| format!("Brak sb_set_config w native DLL: {error}"))?,
             set_gains: *library
                 .get(b"sb_set_gains\0")
                 .map_err(|error| format!("Brak sb_set_gains w native DLL: {error}"))?,
@@ -146,6 +195,24 @@ impl Bridge {
             request_shutdown: *library
                 .get(b"sb_request_shutdown\0")
                 .map_err(|error| format!("Brak sb_request_shutdown w native DLL: {error}"))?,
+            start_session_monitor: *library
+                .get(b"sb_start_audio_session_monitor\0")
+                .map_err(|error| format!("Brak monitora sesji audio w native DLL: {error}"))?,
+            stop_session_monitor: *library
+                .get(b"sb_stop_audio_session_monitor\0")
+                .map_err(|error| format!("Brak zatrzymania monitora sesji audio: {error}"))?,
+            get_audio_sessions: *library
+                .get(b"sb_get_audio_sessions\0")
+                .map_err(|error| format!("Brak listy sesji audio w native DLL: {error}"))?,
+            set_audio_session_volume: *library
+                .get(b"sb_set_audio_session_volume\0")
+                .map_err(|error| format!("Brak regulacji sesji audio w native DLL: {error}"))?,
+            get_audio_session_icon: *library
+                .get(b"sb_get_audio_session_icon_rgba\0")
+                .map_err(|error| format!("Brak ikon sesji audio w native DLL: {error}"))?,
+            repair_default_capture: *library
+                .get(b"sb_repair_default_capture_endpoint\0")
+                .map_err(|error| format!("Brak naprawy mikrofonu w native DLL: {error}"))?,
             _library: library,
         };
 
@@ -155,31 +222,25 @@ impl Bridge {
         if (bridge.reset)() == 0 {
             return Err("Nie udało się wyzerować sesji native audio".into());
         }
+        if (bridge.start_session_monitor)() == 0 {
+            return Err("Nie udało się uruchomić lekkiego monitora aplikacji audio".into());
+        }
         Ok(bridge)
     }
 
-    fn set_input(&self, endpoint_id: &str) -> Result<(), String> {
-        let wide = wide_null(endpoint_id);
-        if unsafe { (self.set_input)(wide.as_ptr()) } == 0 {
-            Err("Native engine odrzucił mikrofon wejściowy".into())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn set_output(&self, endpoint_id: &str) -> Result<(), String> {
-        let wide = wide_null(endpoint_id);
-        if unsafe { (self.set_output)(wide.as_ptr()) } == 0 {
-            Err("Native engine odrzucił wirtualne wyjście".into())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn set_virtual_capture(&self, endpoint_id: &str) -> Result<(), String> {
-        let wide = wide_null(endpoint_id);
-        if unsafe { (self.set_virtual_capture)(wide.as_ptr()) } == 0 {
-            Err("Native engine odrzucił systemowy mikrofon wirtualny".into())
+    fn set_config(
+        &self,
+        input_endpoint_id: &str,
+        output_endpoint_id: &str,
+        virtual_capture_endpoint_id: &str,
+    ) -> Result<(), String> {
+        let input = wide_null(input_endpoint_id);
+        let output = wide_null(output_endpoint_id);
+        let virtual_capture = wide_null(virtual_capture_endpoint_id);
+        if unsafe { (self.set_config)(input.as_ptr(), output.as_ptr(), virtual_capture.as_ptr()) }
+            == 0
+        {
+            Err("Native engine odrzucił atomową konfigurację urządzeń".into())
         } else {
             Ok(())
         }
@@ -236,15 +297,111 @@ impl Bridge {
             system_level: raw.system_level,
             mixed_level: raw.mixed_level,
             underruns: raw.underruns,
+            capture_overruns: raw.capture_overruns,
+            dropped_audio_frames: raw.dropped_audio_frames,
             estimated_latency_ms: raw.estimated_latency_ms,
             error: (!error.trim().is_empty()).then_some(error),
+        }
+    }
+
+    fn audio_sessions(&self) -> Vec<AudioSession> {
+        let count = unsafe { (self.get_audio_sessions)(std::ptr::null_mut(), 0) }.min(32);
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut raw = vec![RawAudioSession::default(); count as usize];
+        let actual =
+            unsafe { (self.get_audio_sessions)(raw.as_mut_ptr(), count) }.min(count) as usize;
+        raw.truncate(actual);
+        raw.into_iter()
+            .map(|session| {
+                let name_length = session
+                    .name
+                    .iter()
+                    .position(|value| *value == 0)
+                    .unwrap_or(session.name.len());
+                AudioSession {
+                    id: session.session_key.to_string(),
+                    name: String::from_utf16_lossy(&session.name[..name_length]),
+                    peak_level: session.peak_level.clamp(0.0, 1.5),
+                    volume: session.volume.clamp(0.0, 1.0),
+                    muted: session.muted != 0,
+                    active: session.active != 0,
+                    last_active_age_ms: session.last_active_age_ms,
+                    icon_data_url: self.audio_session_icon(session.session_key),
+                }
+            })
+            .collect()
+    }
+
+    fn audio_session_icon(&self, session_key: u64) -> Option<String> {
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let required = unsafe {
+            (self.get_audio_session_icon)(
+                session_key,
+                std::ptr::null_mut(),
+                0,
+                &mut width,
+                &mut height,
+            )
+        };
+        if required == 0 || width == 0 || height == 0 || required > 1024 * 1024 {
+            return None;
+        }
+        let mut rgba = vec![0u8; required as usize];
+        let written = unsafe {
+            (self.get_audio_session_icon)(
+                session_key,
+                rgba.as_mut_ptr(),
+                required,
+                &mut width,
+                &mut height,
+            )
+        };
+        if written != required {
+            return None;
+        }
+        encode_png_data_url(&rgba, width, height).ok()
+    }
+
+    fn set_audio_session_volume(&self, session_key: u64, volume: f32) -> Result<(), String> {
+        if unsafe { (self.set_audio_session_volume)(session_key, volume.clamp(0.0, 1.0)) } == 0 {
+            Err("Ta aplikacja audio nie jest już dostępna".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn repair_default_capture(&self, endpoint_id: &str) -> Result<(), String> {
+        let endpoint = wide_null(endpoint_id);
+        let mut error = [0u16; 256];
+        if unsafe {
+            (self.repair_default_capture)(endpoint.as_ptr(), error.as_mut_ptr(), error.len() as u32)
+        } == 0
+        {
+            let length = error
+                .iter()
+                .position(|value| *value == 0)
+                .unwrap_or(error.len());
+            let message = String::from_utf16_lossy(&error[..length]);
+            Err(if message.trim().is_empty() {
+                "Windows odrzucił naprawę domyślnego mikrofonu".into()
+            } else {
+                message
+            })
+        } else {
+            Ok(())
         }
     }
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
-        unsafe { (self.close)() }
+        unsafe {
+            (self.stop_session_monitor)();
+            (self.close)();
+        }
     }
 }
 
@@ -306,10 +463,11 @@ impl NativeAudioEngine {
     }
 
     pub fn configure(&self, config: NativeAudioConfig<'_>) -> Result<(), String> {
-        self.bridge.set_input(config.input_endpoint_id)?;
-        self.bridge.set_output(config.output_endpoint_id)?;
-        self.bridge
-            .set_virtual_capture(config.virtual_capture_endpoint_id)?;
+        self.bridge.set_config(
+            config.input_endpoint_id,
+            config.output_endpoint_id,
+            config.virtual_capture_endpoint_id,
+        )?;
         self.bridge
             .set_gains(config.microphone_gain, config.sound_gain);
         self.bridge
@@ -332,6 +490,21 @@ impl NativeAudioEngine {
     pub fn status(&self) -> EngineStatus {
         self.bridge.touch();
         self.bridge.status()
+    }
+
+    pub fn audio_sessions(&self) -> Vec<AudioSession> {
+        self.bridge.audio_sessions()
+    }
+
+    pub fn set_audio_session_volume(&self, id: &str, volume: f32) -> Result<(), String> {
+        let session_key = id
+            .parse::<u64>()
+            .map_err(|_| "Nieprawidłowy identyfikator aplikacji audio".to_string())?;
+        self.bridge.set_audio_session_volume(session_key, volume)
+    }
+
+    pub fn repair_default_capture(&self, endpoint_id: &str) -> Result<(), String> {
+        self.bridge.repair_default_capture(endpoint_id)
     }
 
     pub fn play_file(&self, path: &Path) -> Result<(), String> {
@@ -474,6 +647,28 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 fn wide_null(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(Some(0)).collect()
+}
+
+fn encode_png_data_url(rgba: &[u8], width: u32, height: u32) -> Result<String, String> {
+    if rgba.len() != width as usize * height as usize * 4 {
+        return Err("Nieprawidłowy bufor ikony aplikacji".into());
+    }
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|error| format!("Nie udało się zakodować ikony: {error}"))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|error| format!("Nie udało się zapisać ikony: {error}"))?;
+    }
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png_bytes)
+    ))
 }
 
 #[cfg(test)]
