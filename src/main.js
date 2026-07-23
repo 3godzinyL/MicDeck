@@ -1,14 +1,28 @@
 import './styles.css';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
 import { open } from '@tauri-apps/plugin-dialog';
+import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
 import { initialLanguage, LANGUAGE_STORAGE_KEY, translate } from './i18n.js';
+
+const GLOW_STORAGE_KEY = 'micdeck.cursorGlow.v2';
+
+function storedBoolean(key, fallback = false) {
+  try {
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value === 'true';
+  } catch {
+    return fallback;
+  }
+}
 
 const state = {
   activeView: 'library',
   language: initialLanguage(),
   autostartEnabled: false,
   isUpdatingAutostart: false,
+  cursorGlowEnabled: storedBoolean(GLOW_STORAGE_KEY, true),
   sounds: [],
   inputDevices: [],
   selectedInputDevice: null,
@@ -51,6 +65,10 @@ const state = {
   urlInput: '',
   mediaPlatform: 'auto',
   isImporting: false,
+  isAddingSounds: false,
+  libraryWorker: null,
+  shortcutRecorder: null,
+  shortcutErrors: new Map(),
   toast: null,
   playback: {
     isPlaying: false,
@@ -67,6 +85,10 @@ const state = {
 let playbackTimer = null;
 let toastTimer = null;
 let renderedLiveId = null;
+let newestSoundIds = new Set();
+let glowFrame = null;
+let pointerX = window.innerWidth * 0.72;
+let pointerY = window.innerHeight * 0.22;
 
 const icons = {
   library: '<path d="M4 5.5h16M4 12h16M4 18.5h10"/><circle cx="18" cy="18.5" r="2.5"/>',
@@ -90,7 +112,10 @@ const icons = {
   ,
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/>',
   tray: '<path d="M5 5h14v10H5zM8 19h8M12 15v4"/><path d="M8 9h8"/>',
-  power: '<path d="M12 3v9M6.2 6.2a8 8 0 1 0 11.6 0"/>'
+  power: '<path d="M12 3v9M6.2 6.2a8 8 0 1 0 11.6 0"/>',
+  keyboard: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M7 14h.01M10 14h7"/>',
+  sparkle: '<path d="m12 3 1.3 3.7L17 8l-3.7 1.3L12 13l-1.3-3.7L7 8l3.7-1.3L12 3Z"/><path d="m18 14 .8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8L18 14Z"/>',
+  close: '<path d="m6 6 12 12M18 6 6 18"/>'
 };
 
 document.documentElement.lang = state.language;
@@ -187,6 +212,217 @@ function paintToast() {
     : '';
 }
 
+function shortcutParts(shortcut) {
+  return String(shortcut || '')
+    .split('+')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function shortcutMarkup(shortcut, emptyLabel = t('shortcut.assign')) {
+  const parts = shortcutParts(shortcut);
+  if (parts.length === 0) {
+    return `<span class="shortcut-empty">${icon('keyboard')} ${emptyLabel}</span>`;
+  }
+  return `<span class="shortcut-keys">${parts.map((part) => `<kbd>${escapeHtml(part)}</kbd>`).join('<i>+</i>')}</span>`;
+}
+
+function shortcutFromRecorder() {
+  if (!state.shortcutRecorder?.key) return null;
+  return [...state.shortcutRecorder.modifiers, state.shortcutRecorder.key].join('+');
+}
+
+function shortcutPreviewFromRecorder() {
+  const recorder = state.shortcutRecorder;
+  if (!recorder) return null;
+  return [...recorder.modifiers, ...(recorder.key ? [recorder.key] : [])].join('+') || null;
+}
+
+function keyFromKeyboardEvent(event) {
+  if (/^Key[A-Z]$/.test(event.code)) return event.code.slice(3);
+  if (/^Digit[0-9]$/.test(event.code)) return event.code.slice(5);
+  if (/^Numpad[0-9]$/.test(event.code)) return `Numpad${event.code.slice(6)}`;
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(event.code)) return event.code;
+
+  const keys = {
+    Space: 'Space',
+    Enter: 'Enter',
+    Tab: 'Tab',
+    Escape: 'Escape',
+    ArrowUp: 'ArrowUp',
+    ArrowDown: 'ArrowDown',
+    ArrowLeft: 'ArrowLeft',
+    ArrowRight: 'ArrowRight',
+    Home: 'Home',
+    End: 'End',
+    PageUp: 'PageUp',
+    PageDown: 'PageDown',
+    Insert: 'Insert',
+    Delete: 'Delete',
+    Backquote: 'Backquote',
+    Minus: 'Minus',
+    Equal: 'Equal',
+    BracketLeft: 'BracketLeft',
+    BracketRight: 'BracketRight',
+    Backslash: 'Backslash',
+    Semicolon: 'Semicolon',
+    Quote: 'Quote',
+    Comma: 'Comma',
+    Period: 'Period',
+    Slash: 'Slash',
+    NumpadAdd: 'NumpadAdd',
+    NumpadSubtract: 'NumpadSubtract',
+    NumpadMultiply: 'NumpadMultiply',
+    NumpadDivide: 'NumpadDivide',
+    NumpadDecimal: 'NumpadDecimal'
+  };
+  return keys[event.code] || null;
+}
+
+function modifierFromKeyboardEvent(event) {
+  if (event.key === 'Control') return 'Ctrl';
+  if (event.key === 'Alt' || event.key === 'AltGraph') return 'Alt';
+  if (event.key === 'Shift') return 'Shift';
+  if (event.key === 'Meta') return 'Super';
+  return null;
+}
+
+async function syncGlobalShortcuts() {
+  if (state.shortcutRecorder) return;
+  const errors = new Map();
+  await unregisterAll().catch(() => {});
+
+  for (const sound of state.sounds.filter((item) => item.shortcut)) {
+    try {
+      await register(sound.shortcut, async (event) => {
+        if (event.state !== 'Pressed') return;
+        try {
+          await invoke('play_sound', { id: sound.id });
+          startPlaybackPolling();
+        } catch (error) {
+          showToast(t('toast.playFailed', { error }), 'error');
+        }
+      });
+    } catch (error) {
+      errors.set(sound.id, String(error));
+    }
+  }
+
+  state.shortcutErrors = errors;
+  return errors;
+}
+
+async function openShortcutRecorder(soundId) {
+  const sound = state.sounds.find((item) => item.id === soundId);
+  if (!sound) return;
+
+  await unregisterAll().catch(() => {});
+  const parts = shortcutParts(sound.shortcut);
+  const knownModifiers = new Set(['Ctrl', 'Alt', 'Shift', 'Super']);
+  state.shortcutRecorder = {
+    soundId,
+    soundName: sound.name.replace(/\.[^/.]+$/, ''),
+    modifiers: parts.filter((part) => knownModifiers.has(part)),
+    key: parts.find((part) => !knownModifiers.has(part)) || null
+  };
+  render();
+  document.querySelector('.shortcut-dialog')?.focus();
+}
+
+async function closeShortcutRecorder() {
+  state.shortcutRecorder = null;
+  render();
+  await syncGlobalShortcuts();
+}
+
+async function saveShortcut(shortcut) {
+  const recorder = state.shortcutRecorder;
+  if (!recorder) return;
+
+  try {
+    state.sounds = await invoke('set_sound_shortcut', {
+      id: recorder.soundId,
+      shortcut
+    });
+    state.shortcutRecorder = null;
+    render();
+    const errors = await syncGlobalShortcuts();
+    if (shortcut && errors?.has(recorder.soundId)) {
+      showToast(t('toast.shortcutUnavailable'), 'error');
+    } else {
+      showToast(t(shortcut ? 'toast.shortcutSaved' : 'toast.shortcutCleared'), 'success');
+    }
+  } catch (error) {
+    showToast(error, 'error');
+  }
+}
+
+function captureShortcutKey(event) {
+  const recorder = state.shortcutRecorder;
+  if (!recorder || event.repeat) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (event.key === 'Escape') {
+    closeShortcutRecorder();
+    return;
+  }
+  if (event.key === 'Backspace') {
+    if (recorder.key) recorder.key = null;
+    else recorder.modifiers.pop();
+    render();
+    return;
+  }
+
+  const modifier = modifierFromKeyboardEvent(event);
+  if (modifier) {
+    if (!recorder.modifiers.includes(modifier)) recorder.modifiers.push(modifier);
+    render();
+    return;
+  }
+
+  const key = keyFromKeyboardEvent(event);
+  if (!key) {
+    showToast(t('shortcut.unsupported'), 'error');
+    return;
+  }
+  recorder.key = key;
+  render();
+}
+
+function toggleCursorGlow() {
+  state.cursorGlowEnabled = !state.cursorGlowEnabled;
+  try {
+    localStorage.setItem(GLOW_STORAGE_KEY, String(state.cursorGlowEnabled));
+  } catch {
+    // The visual preference remains active for the current session.
+  }
+  render();
+  showToast(t(state.cursorGlowEnabled ? 'toast.glowOn' : 'toast.glowOff'), 'success');
+}
+
+function setupCursorGlowTracking() {
+  window.addEventListener('pointermove', (event) => {
+    if (!state.cursorGlowEnabled) return;
+    pointerX = event.clientX;
+    pointerY = event.clientY;
+    if (glowFrame) return;
+    glowFrame = requestAnimationFrame(() => {
+      glowFrame = null;
+      document.documentElement.style.setProperty('--cursor-x', `${pointerX}px`);
+      document.documentElement.style.setProperty('--cursor-y', `${pointerY}px`);
+    });
+  }, { passive: true });
+}
+
+async function setupLibraryWorkerEvents() {
+  await listen('library-worker-progress', ({ payload }) => {
+    state.libraryWorker = payload;
+    if (state.activeView === 'library') render();
+  });
+}
+
 async function refreshState() {
   const [
     sounds,
@@ -240,17 +476,30 @@ async function refreshState() {
 }
 
 async function addSounds() {
+  if (state.isAddingSounds) return;
   const selected = await open({
     multiple: true,
     filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'flac', 'ogg', 'm4a', 'aac', 'wma'] }]
   });
   if (!selected || (Array.isArray(selected) && selected.length === 0)) return;
   const paths = Array.isArray(selected) ? selected : [selected];
+  const previousIds = new Set(state.sounds.map((sound) => sound.id));
+  state.isAddingSounds = true;
+  state.libraryWorker = { kind: 'files', stage: 'queued', current: 0, total: paths.length, fileName: null };
+  render();
   try {
     state.sounds = await invoke('add_sounds', { paths });
+    newestSoundIds = new Set(state.sounds.filter((sound) => !previousIds.has(sound.id)).map((sound) => sound.id));
+    state.isAddingSounds = false;
+    state.libraryWorker = null;
     render();
-    showToast(t(paths.length === 1 ? 'toast.soundsAdded.one' : 'toast.soundsAdded.many', { count: paths.length }), 'success');
+    const addedCount = newestSoundIds.size;
+    showToast(t(addedCount === 1 ? 'toast.soundsAdded.one' : 'toast.soundsAdded.many', { count: addedCount }), 'success');
+    setTimeout(() => newestSoundIds.clear(), 1400);
   } catch (error) {
+    state.isAddingSounds = false;
+    state.libraryWorker = null;
+    render();
     showToast(error, 'error');
   }
 }
@@ -258,18 +507,24 @@ async function addSounds() {
 async function importFromUrl() {
   const url = state.urlInput.trim();
   if (!url || state.isImporting) return;
+  const previousIds = new Set(state.sounds.map((sound) => sound.id));
   state.isImporting = true;
+  state.libraryWorker = { kind: 'url', stage: 'validating', current: 0, total: 1, fileName: null };
   render();
   try {
     state.sounds = await invoke('import_from_url', { url });
+    newestSoundIds = new Set(state.sounds.filter((sound) => !previousIds.has(sound.id)).map((sound) => sound.id));
     const source = platformLabel();
     state.urlInput = '';
     state.mediaPlatform = 'auto';
     state.isImporting = false;
+    state.libraryWorker = null;
     render();
     showToast(t('toast.imported', { source }), 'success');
+    setTimeout(() => newestSoundIds.clear(), 1400);
   } catch (error) {
     state.isImporting = false;
+    state.libraryWorker = null;
     render();
     showToast(error, 'error');
   }
@@ -280,6 +535,7 @@ async function removeSound(id) {
   try {
     await invoke('remove_sound', { id });
     await refreshState();
+    await syncGlobalShortcuts();
     showToast(t('toast.removed'), 'success');
   } catch (error) {
     showToast(error, 'error');
@@ -593,8 +849,9 @@ function soundArtwork(sound, index) {
 
 function soundCard(sound, index) {
   const isLive = state.playback.isPlaying && state.playback.soundId === sound.id;
+  const shortcutError = state.shortcutErrors.has(sound.id);
   return `
-    <article class="sound-card ${isLive ? 'is-live' : ''}">
+    <article class="sound-card ${isLive ? 'is-live' : ''} ${newestSoundIds.has(sound.id) ? 'is-new' : ''}">
       ${soundArtwork(sound, index)}
       <div class="sound-card-body">
         <div class="sound-card-top">
@@ -610,6 +867,11 @@ function soundCard(sound, index) {
         ${isLive ? `
           <div class="card-progress"><i class="mini-fill" style="width:${Math.round((state.playback.progress01 || 0) * 100)}%"></i></div>
         ` : ''}
+        <button class="shortcut-control ${sound.shortcut ? 'has-shortcut' : ''} ${shortcutError ? 'has-error' : ''}" data-shortcut-id="${escapeHtml(sound.id)}" title="${escapeHtml(shortcutError ? t('shortcut.unavailable') : t('shortcut.clickToEdit'))}">
+          <span class="shortcut-control-label">${t('shortcut.label')}</span>
+          ${shortcutMarkup(sound.shortcut)}
+          ${shortcutError ? icon('alert') : icon('keyboard')}
+        </button>
         <div class="sound-actions">
           <button class="play-button play-btn" data-id="${escapeHtml(sound.id)}">
             ${icon(isLive ? 'studio' : 'play')}
@@ -624,6 +886,77 @@ function soundCard(sound, index) {
   `;
 }
 
+function libraryWorkerStatus() {
+  const worker = state.libraryWorker;
+  if (!worker) return '';
+
+  const stageProgress = {
+    queued: 6,
+    validating: 12,
+    downloading: 42,
+    analyzing: 58,
+    finalizing: 92,
+    complete: 100,
+    failed: 100
+  };
+  const itemProgress = worker.total > 0 ? (worker.current / worker.total) * 28 : 0;
+  const progress = Math.min(100, Math.round((stageProgress[worker.stage] || 8) + itemProgress));
+  const stageKey = `worker.${worker.stage}`;
+
+  return `
+    <section class="library-worker ${worker.stage === 'failed' ? 'has-error' : ''}" aria-live="polite">
+      <div class="worker-orbit"><span></span>${icon(worker.kind === 'url' ? 'download' : 'studio')}</div>
+      <div class="worker-copy">
+        <div class="worker-title-row">
+          <strong>${t(worker.kind === 'url' ? 'worker.captureTitle' : 'worker.filesTitle')}</strong>
+          <span>${progress}%</span>
+        </div>
+        <p>${escapeHtml(t(stageKey))}${worker.fileName ? ` · ${escapeHtml(worker.fileName)}` : ''}</p>
+        <div class="worker-track"><i style="width:${progress}%"></i></div>
+      </div>
+      <span class="worker-thread">${icon('bolt')} ${t('worker.thread')}</span>
+    </section>
+  `;
+}
+
+function shortcutDialog() {
+  const recorder = state.shortcutRecorder;
+  if (!recorder) return '';
+  const shortcut = shortcutPreviewFromRecorder();
+  const instruction = recorder.key
+    ? t('shortcut.ready')
+    : recorder.modifiers.length > 0
+      ? t('shortcut.pressTrigger')
+      : t('shortcut.pressFirst');
+  const savedSound = state.sounds.find((sound) => sound.id === recorder.soundId);
+
+  return `
+    <div class="modal-backdrop" data-close-shortcut>
+      <section class="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title" tabindex="-1">
+        <button class="dialog-close" data-cancel-shortcut aria-label="${t('common.cancel')}">${icon('close')}</button>
+        <div class="dialog-icon">${icon('keyboard')}</div>
+        <div class="panel-kicker">GLOBAL HOTKEY</div>
+        <h2 id="shortcut-title">${t('shortcut.title')}</h2>
+        <p class="dialog-sound-name">${escapeHtml(recorder.soundName)}</p>
+        <div class="shortcut-capture ${recorder.key ? 'is-ready' : 'is-listening'}">
+          <span class="capture-pulse"></span>
+          ${shortcutMarkup(shortcut, t('shortcut.waiting'))}
+        </div>
+        <p class="shortcut-instruction">${instruction}</p>
+        <div class="shortcut-hints">
+          <span><kbd>Esc</kbd> ${t('common.cancel')}</span>
+          <span><kbd>Backspace</kbd> ${t('shortcut.undo')}</span>
+        </div>
+        <div class="dialog-actions">
+          <button class="button button-subtle" data-clear-shortcut ${savedSound?.shortcut ? '' : 'disabled'}>${t('shortcut.clear')}</button>
+          <button class="button button-subtle" data-cancel-shortcut>${t('common.cancel')}</button>
+          <button class="button button-primary" data-save-shortcut ${recorder.key ? '' : 'disabled'}>${t('common.save')}</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function libraryView() {
   const sounds = filteredSounds();
   return `
@@ -631,8 +964,12 @@ function libraryView() {
       t('library.kicker'),
       t('library.title'),
       t('library.description'),
-      `<button class="button button-primary" id="add-btn">${icon('plus')} ${t('library.addFiles')}</button>`
+      `<button class="button button-primary" id="add-btn" ${state.isAddingSounds ? 'disabled' : ''}>
+        ${state.isAddingSounds ? `<span class="spinner spinner-dark"></span> ${t('worker.analyzing')}` : `${icon('plus')} ${t('library.addFiles')}`}
+      </button>`
     )}
+
+    ${libraryWorkerStatus()}
 
     <div class="library-lead">
       <section class="capture-card">
@@ -660,6 +997,7 @@ function libraryView() {
           <span>${icon('check')} TikTok</span>
           <small>${t('library.requirements')}</small>
         </div>
+        <div class="capture-rights">${icon('alert')} ${t('library.rightsNotice')}</div>
       </section>
       ${nowPlayingPanel()}
     </div>
@@ -929,6 +1267,16 @@ function settingsView() {
             </div>
             <span class="always-on">${t('common.alwaysOn')}</span>
           </div>
+          <div class="preference-row">
+            <span class="round-icon glow-setting-icon">${icon('sparkle')}</span>
+            <div>
+              <strong>${t('settings.cursorGlow')}</strong>
+              <p>${t('settings.cursorGlowDescription')}</p>
+            </div>
+            <button class="toggle-switch ${state.cursorGlowEnabled ? 'is-on' : ''}" id="cursor-glow-toggle" role="switch" aria-checked="${state.cursorGlowEnabled}" aria-label="${t('settings.cursorGlow')}">
+              <i></i>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -968,7 +1316,11 @@ function render() {
       : libraryView();
 
   document.querySelector('#app').innerHTML = `
-    <div class="app-shell">
+    <div class="app-shell ${state.cursorGlowEnabled ? 'glow-enabled' : ''}">
+      <div class="ambient-canvas" aria-hidden="true">
+        <div class="ambient-grid"></div>
+        <div class="cursor-glow"></div>
+      </div>
       ${appSidebar()}
       <main class="app-content">
         ${appToolbar()}
@@ -976,6 +1328,7 @@ function render() {
         <div class="view-wrap">${view}</div>
       </main>
       <div id="toast-host" class="toast-host"></div>
+      ${shortcutDialog()}
     </div>
   `;
 
@@ -1008,6 +1361,7 @@ function bindEvents() {
   document.getElementById('system-audio-toggle')?.addEventListener('click', toggleSystemAudio);
   document.getElementById('system-audio-cta')?.addEventListener('click', toggleSystemAudio);
   document.getElementById('autostart-toggle')?.addEventListener('click', toggleAutostart);
+  document.getElementById('cursor-glow-toggle')?.addEventListener('click', toggleCursorGlow);
   document.getElementById('physical-microphone')?.addEventListener('change', (event) => onInputDeviceChange(event.target.value));
 
   document.getElementById('microphone-gain-range')?.addEventListener('input', (event) =>
@@ -1054,6 +1408,20 @@ function bindEvents() {
   });
   document.querySelectorAll('.remove-btn').forEach((button) => {
     button.addEventListener('click', () => removeSound(button.dataset.id));
+  });
+  document.querySelectorAll('[data-shortcut-id]').forEach((button) => {
+    button.addEventListener('click', () => openShortcutRecorder(button.dataset.shortcutId));
+  });
+  document.querySelectorAll('[data-cancel-shortcut]').forEach((button) => {
+    button.addEventListener('click', closeShortcutRecorder);
+  });
+  document.querySelector('[data-save-shortcut]')?.addEventListener('click', () => {
+    const shortcut = shortcutFromRecorder();
+    if (shortcut) saveShortcut(shortcut);
+  });
+  document.querySelector('[data-clear-shortcut]')?.addEventListener('click', () => saveShortcut(null));
+  document.querySelector('[data-close-shortcut]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeShortcutRecorder();
   });
 }
 
@@ -1122,8 +1490,16 @@ function startPlaybackPolling() {
   playbackTimer = setInterval(pollPlayback, 140);
 }
 
+window.addEventListener('keydown', captureShortcutKey, true);
+setupCursorGlowTracking();
+setupLibraryWorkerEvents().catch(() => {});
+
 refreshState()
-  .then(startPlaybackPolling)
+  .then(async () => {
+    const errors = await syncGlobalShortcuts();
+    if (errors?.size) render();
+    startPlaybackPolling();
+  })
   .catch((error) => {
     document.querySelector('#app').innerHTML = `
       <div class="boot-error">

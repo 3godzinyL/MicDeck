@@ -36,7 +36,9 @@ MicDeck replaces the usual stack of a soundboard, a loopback recorder, and a com
 
 - **One-click system audio:** send YouTube, Spotify, a game, or any other desktop audio into Discord and voice chat.
 - **Instant sound pads:** play MP3, WAV, FLAC, OGG, AAC, and M4A clips from a focused live deck.
+- **Per-sound global hotkeys:** assign combinations such as `Alt+P` and trigger any clip while MicDeck is in the tray.
 - **Quick Capture:** paste a YouTube, YouTube Shorts, or TikTok URL and add its audio to the library.
+- **Responsive background imports:** downloads, decoding, and waveform analysis run away from the UI thread.
 - **Mic + clips + desktop:** combine every source into one clean virtual microphone.
 - **Adaptive low latency:** negotiate a device-specific shared-mode period through `IAudioClient3` instead of forcing a fixed 70 ms buffer.
 - **Built for Windows:** launch at sign-in, start quietly in the system tray, and keep the audio route alive when the window closes.
@@ -86,7 +88,8 @@ Open the repository's **Releases** section and download one of these files:
 2. Open **Settings** and select your real physical microphone.
 3. In Discord, a game, or another voice app, choose **MicDeck Virtual Mic** as the input device.
 4. Add a clip or open **Live Studio** and enable system-audio sharing.
-5. Optionally enable **Launch at sign-in** under **Settings → Windows integration**.
+5. Click **Set hotkey** on a sound card to record an optional global shortcut.
+6. Optionally enable **Launch at sign-in** under **Settings → Windows integration**.
 
 That is the whole signal chain. Closing the window keeps MicDeck available from the Windows notification area; use **Quit / Zakończ** from the tray menu to stop it completely. MicDeck restores your previous Windows audio defaults when it exits normally, and its watchdog also handles an unexpected engine shutdown.
 
@@ -99,6 +102,7 @@ That is the whole signal chain. Closing the window keeps MicDeck available from 
 | Buffer strategy | Adaptive `IAudioClient3` period | Static buffer |
 | Voice-chat output | One managed virtual mic | Manual cable routing |
 | External media capture | Built-in URL workflow | Download and convert by hand |
+| Clip shortcuts | Persistent per-sound global hotkeys | Requires app focus or extra tooling |
 | Windows integration | Autostart + close-to-tray | Varies by tool |
 | Process access | No injection or hooks | Depends on the tool |
 
@@ -135,7 +139,7 @@ flowchart LR
   cable --> chat["Discord · games · OBS · calls"]
 ```
 
-The Tauri/Rust process owns the UI, library, persistence, downloads, and driver lifecycle. A separate C++20 engine owns event-driven capture, loopback, mixing, monitoring, and render. A versioned shared-memory bridge keeps UI work away from the real-time thread.
+The Tauri/Rust process owns the UI, library, persistence, downloads, and driver lifecycle. Downloads, file decoding, and waveform analysis are dispatched to blocking worker threads, so the webview remains responsive and refreshes only when prepared metadata is ready. A separate C++20 engine owns event-driven capture, loopback, mixing, monitoring, and render. A versioned shared-memory bridge keeps UI work away from the real-time thread.
 
 ### Latency model
 
@@ -194,7 +198,7 @@ docs/                   Screenshots and launch artwork
 - [ ] Per-application audio capture
 - [ ] Normalization, limiter, and lightweight EQ
 - [ ] Multiple decks and profiles
-- [ ] Global hotkeys, Stream Deck, and MIDI control
+- [ ] Stream Deck and MIDI control
 - [ ] Signed builds and automatic updates
 - [ ] More community translations
 

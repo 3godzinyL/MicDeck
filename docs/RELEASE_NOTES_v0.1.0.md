@@ -7,8 +7,11 @@ MicDeck is a native Windows soundboard and system-audio router built for Discord
 - Route your physical microphone, sound pads, and Windows desktop audio through one virtual microphone.
 - Share YouTube, Spotify, games, and other system audio with one broadcast control.
 - Capture audio from YouTube, YouTube Shorts, and TikTok URLs.
+- Assign a persistent global hotkey to every sound and trigger it while MicDeck is in the tray.
+- Keep the interface responsive while downloads, decoding, and waveform analysis run on background workers.
 - Use the complete interface in English or Polish.
 - Launch MicDeck at sign-in and keep it available from the Windows system tray.
+- The subtle organic cursor-following glow is enabled by default and can be disabled in Settings.
 - Monitor live levels, estimated latency, engine state, and underruns.
 - Run a native C++20/WASAPI audio path with adaptive `IAudioClient3` buffering.
 

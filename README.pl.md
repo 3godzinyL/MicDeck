@@ -28,7 +28,9 @@ MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komun
 
 - **Dźwięk systemu jednym kliknięciem:** YouTube, Spotify, gra albo dowolna aplikacja trafia do Discorda.
 - **Szybki soundboard:** MP3, WAV, FLAC, OGG, AAC i M4A na czytelnym live decku.
+- **Globalny bind dla każdego dźwięku:** ustaw np. `Alt+P` i odpal klip nawet wtedy, gdy MicDeck jest schowany w trayu.
 - **Quick Capture:** wklej YouTube, Shorts albo TikTok i dodaj audio do biblioteki.
+- **Płynny import w tle:** pobieranie, dekodowanie i analiza waveformu nie blokują interfejsu.
 - **Jeden miks:** mikrofon, klipy i dźwięk pulpitu wychodzą jako `MicDeck Virtual Mic`.
 - **Adaptacyjne low latency:** `IAudioClient3` negocjuje okres dla konkretnego sprzętu zamiast stałego bufora 70 ms.
 - **Integracja z Windows:** autostart, uruchamianie w tle i stała ikona w zasobniku systemowym.
@@ -72,7 +74,8 @@ Wejdź w **Releases** po prawej stronie repozytorium i pobierz:
 2. W **Ustawieniach** wybierz swój prawdziwy mikrofon.
 3. W Discordzie lub grze ustaw wejście **MicDeck Virtual Mic**.
 4. Dodaj klip albo przejdź do **Studio live** i włącz udostępnianie dźwięku systemu.
-5. Opcjonalnie włącz **Uruchamiaj przy logowaniu** w sekcji **Ustawienia → Integracja z Windows**.
+5. Kliknij **Ustaw bind** na karcie dźwięku i nagraj opcjonalny skrót globalny.
+6. Opcjonalnie włącz **Uruchamiaj przy logowaniu** w sekcji **Ustawienia → Integracja z Windows**.
 
 Zamknięcie okna ukrywa MicDeck w zasobniku systemowym obok zegara i nie przerywa routingu. Pełne wyjście jest dostępne w menu ikony jako **Quit / Zakończ**.
 
@@ -96,7 +99,7 @@ flowchart LR
   cable --> chat["Discord · gry · OBS · rozmowy"]
 ```
 
-Warstwa Rust/Tauri odpowiada za UI, bibliotekę, zapis ustawień, pobieranie i cykl życia sterownika. Osobny silnik C++20 realizuje event-driven capture, loopback, miksowanie, monitoring i render. Wersjonowany most pamięci współdzielonej trzyma pracę interfejsu z dala od wątku real-time.
+Warstwa Rust/Tauri odpowiada za UI, bibliotekę, zapis ustawień, pobieranie i cykl życia sterownika. Pobieranie, dekodowanie i analiza plików są wykonywane na workerach blokujących poza wątkiem UI, a biblioteka odświeża się dopiero po przygotowaniu metadanych. Osobny silnik C++20 realizuje event-driven capture, loopback, miksowanie, monitoring i render. Wersjonowany most pamięci współdzielonej trzyma pracę interfejsu z dala od wątku real-time.
 
 MicDeck pyta urządzenia o obsługiwane okresy shared mode i dobiera niski, stabilny okres blisko minimum sprzętu. Gdy `IAudioClient3` nie jest dostępne, używa bezpiecznego okresu domyślnego. Studio pokazuje szacowane opóźnienie i underruny.
 
@@ -128,7 +131,7 @@ cargo test --manifest-path src-tauri\Cargo.toml --locked
 - [ ] Przechwytywanie dźwięku z wybranej aplikacji
 - [ ] Normalizacja, limiter i lekki EQ
 - [ ] Wiele decków i profili
-- [ ] Globalne hotkeye, Stream Deck i MIDI
+- [ ] Stream Deck i MIDI
 - [ ] Podpisane buildy i automatyczne aktualizacje
 - [ ] Kolejne tłumaczenia społeczności
 

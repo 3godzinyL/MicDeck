@@ -8,8 +8,21 @@ All notable MicDeck changes are documented here. The project follows
 ### Planned
 
 - Per-application audio capture
-- Global hotkeys and hardware controller integrations
+- Hardware controller integrations
 - Signed builds and automatic updates
+
+### Added
+
+- Persistent per-sound global hotkeys with an in-app shortcut recorder
+- Responsive background workers for local imports, URL downloads, decoding, and waveform analysis
+- Live import progress with immediate library refresh when prepared audio is ready
+- Organic cursor-following ambient glow, enabled by default
+- Built-in usage-rights reminder in Quick Capture
+
+### Changed
+
+- Sound metadata analysis no longer blocks startup, playback, or the main UI thread
+- Library cards and primary surfaces now use the refreshed translucent MicDeck visual system
 
 ## [0.1.0] — 2026-07-23
 
