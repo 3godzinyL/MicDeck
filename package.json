@@ -1,0 +1,24 @@
+{
+  "name": "micdeck",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "node scripts/tauri.mjs",
+    "build:all": "node scripts/tauri.mjs all",
+    "build:portable": "node scripts/tauri.mjs portable",
+    "build:installer": "node scripts/tauri.mjs installer"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-autostart": "^2.5.1",
+    "@tauri-apps/plugin-dialog": "^2.4.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.2",
+    "vite": "^7.1.0"
+  }
+}
