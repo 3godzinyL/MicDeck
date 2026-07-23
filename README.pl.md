@@ -13,20 +13,27 @@
 <p align="center">
   <a href="README.md">English</a>
   ·
-  <a href="#pobieranie">Pobieranie</a>
+  <a href="https://github.com/3godzinyL/MicDeck/releases/latest">Pobierz</a>
   ·
   <a href="#jak-to-działa">Jak to działa</a>
   ·
-  <a href="CHANGELOG.md">Changelog</a>
+  <a href="#obecny-zakres">Obecny zakres</a>
   ·
-  <a href="CONTRIBUTING.md">Wkład w projekt</a>
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml"><img alt="Status CI" src="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/3godzinyL/MicDeck/releases/latest"><img alt="Najnowsze wydanie" src="https://img.shields.io/github/v/release/3godzinyL/MicDeck?display_name=tag&style=flat-square&color=c8ff63&labelColor=0c0e11"></a>
+  <img alt="Windows 10 i 11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0c0e11?style=flat-square&logo=windows&logoColor=c8ff63">
+  <a href="LICENSE"><img alt="Licencja MIT" src="https://img.shields.io/badge/license-MIT-0c0e11?style=flat-square&logoColor=c8ff63"></a>
 </p>
 
 ---
 
 MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komunikatorów w jednej aplikacji. Prosty interfejs działa na Tauri i Rust, a krytyczną ścieżkę audio obsługuje osobny silnik C++/WASAPI.
 
-- **Dźwięk systemu jednym kliknięciem:** YouTube, Spotify, gra albo dowolna aplikacja trafia do Discorda.
+- **Dźwięk systemu jednym kliknięciem:** cały domyślny miks Windows, w tym przeglądarka, Spotify i gry, trafia do Discorda.
 - **Szybki soundboard:** MP3, WAV, FLAC, OGG, AAC i M4A na czytelnym live decku.
 - **Globalny bind dla każdego dźwięku:** ustaw np. `Alt+P` i odpal klip nawet wtedy, gdy MicDeck jest schowany w trayu.
 - **Quick Capture:** wklej YouTube, Shorts albo TikTok i dodaj audio do biblioteki.
@@ -38,7 +45,7 @@ MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komun
 - **Local-first:** bez konta, telemetrii, chmury, wstrzykiwania DLL i hooków procesów.
 
 > [!NOTE]
-> MicDeck jest obecnie publiczną wersją preview dla Windows 10/11 x64. Binariów jeszcze nie podpisano certyfikatem, dlatego Windows SmartScreen może pokazać ostrzeżenie.
+> MicDeck jest obecnie publiczną wersją preview dla Windows 10/11 x64. Binariów jeszcze nie podpisano certyfikatem, dlatego Windows SmartScreen może pokazać ostrzeżenie. Pobieraj aplikację wyłącznie z tego repozytorium i sprawdzaj plik `SHA256SUMS.txt`.
 
 ## Wygląd aplikacji
 
@@ -61,21 +68,30 @@ MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komun
 
 ## Pobieranie
 
-Wejdź w **Releases** po prawej stronie repozytorium i pobierz:
+Pobierz najnowsze pliki z [GitHub Releases](https://github.com/3godzinyL/MicDeck/releases/latest):
 
 | Plik | Zastosowanie |
 | --- | --- |
 | `MicDeck-Setup.exe` | Wersja zalecana, instalowana dla aktualnego użytkownika. |
 | `MicDeck-portable.exe` | Aplikacja bez instalacji; sterownik audio nadal może wymagać konfiguracji. |
+| `SHA256SUMS.txt` | Sumy SHA-256 obu plików wykonywalnych. |
+
+Sprawdzenie pobranego instalatora:
+
+```powershell
+Get-FileHash .\MicDeck-Setup.exe -Algorithm SHA256
+```
+
+Porównaj wynik z odpowiednią linią w `SHA256SUMS.txt`.
 
 ### Pierwsze uruchomienie
 
-1. Uruchom MicDeck i zaakceptuj instalator oficjalnego sterownika VB-CABLE, jeśli Windows o niego poprosi.
-2. W **Ustawieniach** wybierz swój prawdziwy mikrofon.
-3. W Discordzie lub grze ustaw wejście **MicDeck Virtual Mic**.
-4. Dodaj klip albo przejdź do **Studio live** i włącz udostępnianie dźwięku systemu.
-5. Kliknij **Ustaw bind** na karcie dźwięku i nagraj opcjonalny skrót globalny.
-6. Opcjonalnie włącz **Uruchamiaj przy logowaniu** w sekcji **Ustawienia → Integracja z Windows**.
+1. Uruchom MicDeck.
+2. Otwórz **Ustawienia** i zainstaluj oficjalny sterownik VB-CABLE, jeśli aplikacja nie wykryła zgodnego wirtualnego urządzenia.
+3. Wybierz swój prawdziwy mikrofon.
+4. W Discordzie lub grze ustaw wejście **MicDeck Virtual Mic**.
+5. Dodaj klip albo przejdź do **Studio live** i włącz udostępnianie dźwięku systemu.
+6. Opcjonalnie ustaw globalne bindy i włącz **Uruchamiaj przy logowaniu**.
 
 Zamknięcie okna ukrywa MicDeck w zasobniku systemowym obok zegara i nie przerywa routingu. Pełne wyjście jest dostępne w menu ikony jako **Quit / Zakończ**.
 
@@ -101,7 +117,22 @@ flowchart LR
 
 Warstwa Rust/Tauri odpowiada za UI, bibliotekę, zapis ustawień, pobieranie i cykl życia sterownika. Pobieranie, dekodowanie i analiza plików są wykonywane na workerach blokujących poza wątkiem UI, a biblioteka odświeża się dopiero po przygotowaniu metadanych. Osobny silnik C++20 realizuje event-driven capture, loopback, miksowanie, monitoring i render. Wersjonowany most pamięci współdzielonej trzyma pracę interfejsu z dala od wątku real-time.
 
-MicDeck pyta urządzenia o obsługiwane okresy shared mode i dobiera niski, stabilny okres blisko minimum sprzętu. Gdy `IAudioClient3` nie jest dostępne, używa bezpiecznego okresu domyślnego. Studio pokazuje szacowane opóźnienie i underruny.
+MicDeck pyta urządzenia o obsługiwane okresy shared mode i dobiera niski, stabilny okres blisko minimum sprzętu. Gdy `IAudioClient3` nie jest dostępne, używa bezpiecznego okresu domyślnego. Capture i render są sterowane zdarzeniami WASAPI, a wątki audio korzystają z MMCSS. Studio pokazuje wynegocjowaną konfigurację, szacowane opóźnienie i underruny zamiast obiecywać jedną wartość poprawną dla każdego sprzętu.
+
+## Obecny zakres
+
+Ta sekcja celowo opisuje granice wersji preview:
+
+| Obszar | Stan w v0.1 |
+| --- | --- |
+| Przechwytywanie systemu | Przechwytywany jest cały domyślny miks Windows. Wybór jednej aplikacji jest dopiero w planach. |
+| Tryb WASAPI | Adaptacyjny shared mode; projekt nie deklaruje exclusive mode. |
+| Monitoring | Przy aktywnym udostępnianiu systemu lokalny odsłuch padów jest wyciszany, aby uniknąć pętli. Pady nadal trafiają do miksu wyjściowego. |
+| Zmiana urządzeń | Studio i Ustawienia pokazują stan oraz błędy silnika. Po zmianie konfiguracji dostępny jest ręczny restart silnika audio. |
+| Przywracanie urządzenia | Poprzednie domyślne wejście jest przywracane przy normalnym zamknięciu. Awaria Windows, utrata zasilania lub wymuszone ubicie procesu nie daje takiej gwarancji. |
+| DSP | Regulacja gainu i łagodna saturacja. Brak hosta VST, odszumiania, noise gate'a i pełnego chainu masteringowego. |
+| Dystrybucja | Buildy mają sumy kontrolne, ale nie mają jeszcze podpisu Authenticode ani automatycznych aktualizacji. |
+| Platformy | Windows x64. Brak deklarowanego wsparcia macOS, Linux, ARM64, Stream Deck i MIDI. |
 
 ## Build ze źródeł
 
@@ -135,11 +166,23 @@ cargo test --manifest-path src-tauri\Cargo.toml --locked
 - [ ] Podpisane buildy i automatyczne aktualizacje
 - [ ] Kolejne tłumaczenia społeczności
 
-## Bezpieczeństwo, wkład i licencja
+## Prywatność i bezpieczeństwo
 
-Audio jest przetwarzane lokalnie. Zgłoszenia bezpieczeństwa opisuje [SECURITY.md](SECURITY.md), zasady kontrybucji [CONTRIBUTING.md](CONTRIBUTING.md), a zależności zewnętrzne [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Mikrofon, pady i dźwięk systemu są przetwarzane lokalnie.
+- MicDeck nie ma kont, telemetrii, analytics ani chmurowej usługi audio.
+- Aplikacja nie wstrzykuje DLL i nie hookuje procesów innych programów.
+- Archiwum oficjalnego VB-CABLE jest przed rozpakowaniem porównywane z sumą SHA-256 zapisaną w kodzie.
+- Tymczasowe pliki instalatora sterownika są usuwane po jego zakończeniu.
 
-Kod MicDeck jest dostępny na [licencji MIT](LICENSE). Zewnętrzne komponenty zachowują własne warunki.
+Aktualne pliki wykonywalne nie są podpisane. To jawne ograniczenie wersji preview i najważniejszy pozostały element utwardzenia dystrybucji.
+
+Podejrzenia podatności zgłaszaj prywatnie według [SECURITY.md](SECURITY.md).
+
+## VB-CABLE, wkład i licencja
+
+MicDeck zawiera oficjalny, niezmodyfikowany pakiet **VB-CABLE Driver Pack 45**. Jest to oddzielny produkt VB-Audio udostępniany w modelu donationware. Szczegóły atrybucji i warunków dystrybucji znajdują się w [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Zasady zgłaszania zmian opisuje [CONTRIBUTING.md](CONTRIBUTING.md). Kod MicDeck jest dostępny na [licencji MIT](LICENSE), a zewnętrzne komponenty zachowują własne warunki.
 
 ---
 
