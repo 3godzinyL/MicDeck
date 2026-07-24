@@ -94,20 +94,6 @@ struct NativeAudioStatusDto {
     system_level_01: f32,
     #[serde(rename = "mixedLevel01")]
     mixed_level_01: f32,
-    #[serde(rename = "microphoneInputLevel01")]
-    microphone_input_level_01: f32,
-    #[serde(rename = "microphoneOutputLevel01")]
-    microphone_output_level_01: f32,
-    #[serde(rename = "systemInputLevel01")]
-    system_input_level_01: f32,
-    #[serde(rename = "systemOutputLevel01")]
-    system_output_level_01: f32,
-    #[serde(rename = "voiceProbability01")]
-    voice_probability_01: f32,
-    #[serde(rename = "microphoneAppliedGain")]
-    microphone_applied_gain: f32,
-    #[serde(rename = "systemAppliedGain")]
-    system_applied_gain: f32,
     underruns: u32,
     #[serde(rename = "captureOverruns")]
     capture_overruns: u32,
@@ -119,89 +105,9 @@ struct NativeAudioStatusDto {
     runtime: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VoiceProcessingSettings {
-    aec_enabled: bool,
-    rnnoise_enabled: bool,
-    auto_level_enabled: bool,
-    target_min_db: f32,
-    target_max_db: f32,
-    voice_monitor_enabled: bool,
-    voice_monitor_gain: f32,
-    noise_gate_enabled: bool,
-    gate_threshold_db: f32,
-    compressor_ratio: f32,
-    limiter_ceiling_db: f32,
-}
-
-impl Default for VoiceProcessingSettings {
-    fn default() -> Self {
-        Self {
-            aec_enabled: false,
-            rnnoise_enabled: false,
-            auto_level_enabled: false,
-            target_min_db: -19.0,
-            target_max_db: -13.0,
-            voice_monitor_enabled: false,
-            voice_monitor_gain: 0.25,
-            noise_gate_enabled: false,
-            gate_threshold_db: -55.0,
-            compressor_ratio: 3.0,
-            limiter_ceiling_db: -1.0,
-        }
-    }
-}
-
-impl VoiceProcessingSettings {
-    fn sanitized(self) -> Self {
-        let mut target_min_db = clamp_db(self.target_min_db, -19.0);
-        let mut target_max_db = clamp_db(self.target_max_db, -13.0);
-        if target_min_db > target_max_db {
-            std::mem::swap(&mut target_min_db, &mut target_max_db);
-        }
-        Self {
-            target_min_db,
-            target_max_db,
-            voice_monitor_gain: if self.voice_monitor_gain.is_finite() {
-                self.voice_monitor_gain.clamp(0.0, 2.0)
-            } else {
-                0.25
-            },
-            gate_threshold_db: clamp_db(self.gate_threshold_db, -55.0),
-            compressor_ratio: if self.compressor_ratio.is_finite() {
-                self.compressor_ratio.clamp(1.0, 20.0)
-            } else {
-                3.0
-            },
-            limiter_ceiling_db: clamp_db(self.limiter_ceiling_db, -1.0).clamp(-12.0, 0.0),
-            ..self
-        }
-    }
-
-    fn native(self) -> native_audio::VoiceProcessingConfig {
-        let settings = self.sanitized();
-        native_audio::VoiceProcessingConfig {
-            aec_enabled: settings.aec_enabled,
-            rnnoise_enabled: settings.rnnoise_enabled,
-            auto_level_enabled: settings.auto_level_enabled,
-            target_min_db: settings.target_min_db,
-            target_max_db: settings.target_max_db,
-            voice_monitor_enabled: settings.voice_monitor_enabled,
-            voice_monitor_gain: settings.voice_monitor_gain,
-            noise_gate_enabled: settings.noise_gate_enabled,
-            gate_threshold_db: settings.gate_threshold_db,
-            compressor_ratio: settings.compressor_ratio,
-            limiter_ceiling_db: settings.limiter_ceiling_db,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct AudioSessionDto {
     id: String,
-    #[serde(rename = "processId")]
-    process_id: u32,
     name: String,
     #[serde(rename = "peakLevel01")]
     peak_level_01: f32,
@@ -272,8 +178,6 @@ struct PersistedState {
     #[serde(default = "default_system_audio_gain")]
     system_audio_gain: f32,
     #[serde(default)]
-    voice_processing: VoiceProcessingSettings,
-    #[serde(default)]
     virtual_render_device: Option<String>,
     #[serde(default)]
     virtual_capture_device: Option<String>,
@@ -297,7 +201,6 @@ struct AppState {
     monitor_gain: f32,
     system_audio_enabled: bool,
     system_audio_gain: f32,
-    voice_processing: VoiceProcessingSettings,
     next_id: u64,
     playback: Option<ActivePlayback>,
     virtual_render_device: Option<String>,
@@ -361,10 +264,6 @@ impl AppState {
                 .as_ref()
                 .map(|p| clamp_system_audio_gain(p.system_audio_gain))
                 .unwrap_or_else(default_system_audio_gain),
-            voice_processing: persisted
-                .as_ref()
-                .map(|p| p.voice_processing.sanitized())
-                .unwrap_or_default(),
             next_id,
             playback: None,
             virtual_render_device: persisted
@@ -387,7 +286,6 @@ impl AppState {
             monitor_gain: self.monitor_gain,
             system_audio_enabled: self.system_audio_enabled,
             system_audio_gain: self.system_audio_gain,
-            voice_processing: self.voice_processing,
             virtual_render_device: self.virtual_render_device.clone(),
             virtual_capture_device: self.virtual_capture_device.clone(),
         };
@@ -537,14 +435,6 @@ fn clamp_system_audio_gain(v: f32) -> f32 {
 
 fn default_system_audio_gain() -> f32 {
     0.85
-}
-
-fn clamp_db(value: f32, fallback: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(-90.0, 0.0)
-    } else {
-        fallback
-    }
 }
 
 fn file_name_for_path(path: &Path) -> String {
@@ -915,7 +805,6 @@ fn configure_native_runtime(
         sound_gain: app.effective_sound_gain(),
         system_audio_enabled: app.system_audio_enabled,
         system_audio_gain: app.system_audio_gain,
-        voice_processing: app.voice_processing.native(),
     })?;
     engine.set_monitor_gain(app.monitor_gain);
     runtime.startup_error = None;
@@ -1103,34 +992,6 @@ fn set_system_audio_gain(
 }
 
 #[tauri::command]
-fn get_voice_processing_settings(
-    state: tauri::State<'_, Mutex<AppState>>,
-) -> Result<VoiceProcessingSettings, String> {
-    let app = state.lock().map_err(|_| "State lock error".to_string())?;
-    Ok(app.voice_processing)
-}
-
-#[tauri::command]
-fn set_voice_processing_settings(
-    settings: VoiceProcessingSettings,
-    state: tauri::State<'_, Mutex<AppState>>,
-    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
-) -> Result<VoiceProcessingSettings, String> {
-    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
-    app.voice_processing = settings.sanitized();
-    app.persist()?;
-    if let Some(engine) = native
-        .lock()
-        .map_err(|_| "Native audio lock error".to_string())?
-        .engine
-        .as_ref()
-    {
-        engine.set_voice_processing(app.voice_processing.native());
-    }
-    Ok(app.voice_processing)
-}
-
-#[tauri::command]
 fn get_native_audio_status(
     native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
 ) -> Result<NativeAudioStatusDto, String> {
@@ -1147,13 +1008,6 @@ fn get_native_audio_status(
             microphone_level_01: 0.0,
             system_level_01: 0.0,
             mixed_level_01: 0.0,
-            microphone_input_level_01: 0.0,
-            microphone_output_level_01: 0.0,
-            system_input_level_01: 0.0,
-            system_output_level_01: 0.0,
-            voice_probability_01: 0.0,
-            microphone_applied_gain: 1.0,
-            system_applied_gain: 1.0,
             underruns: 0,
             capture_overruns: 0,
             dropped_audio_frames: 0,
@@ -1178,13 +1032,6 @@ fn get_native_audio_status(
         microphone_level_01: status.microphone_level.clamp(0.0, 1.5),
         system_level_01: status.system_level.clamp(0.0, 1.5),
         mixed_level_01: status.mixed_level.clamp(0.0, 1.5),
-        microphone_input_level_01: status.microphone_input_level.clamp(0.0, 1.5),
-        microphone_output_level_01: status.microphone_output_level.clamp(0.0, 1.5),
-        system_input_level_01: status.system_input_level.clamp(0.0, 1.5),
-        system_output_level_01: status.system_output_level.clamp(0.0, 1.5),
-        voice_probability_01: status.voice_probability.clamp(0.0, 1.0),
-        microphone_applied_gain: status.microphone_applied_gain.clamp(0.0, 24.0),
-        system_applied_gain: status.system_applied_gain.clamp(0.0, 24.0),
         underruns: status.underruns,
         capture_overruns: status.capture_overruns,
         dropped_audio_frames: status.dropped_audio_frames,
@@ -1209,7 +1056,6 @@ fn list_audio_sessions(
         .into_iter()
         .map(|session| AudioSessionDto {
             id: session.id,
-            process_id: session.process_id,
             name: session.name,
             peak_level_01: session.peak_level,
             volume: session.volume,
@@ -1819,8 +1665,6 @@ pub fn run() {
             set_system_audio_enabled,
             get_system_audio_gain,
             set_system_audio_gain,
-            get_voice_processing_settings,
-            set_voice_processing_settings,
             get_native_audio_status,
             list_audio_sessions,
             set_audio_session_volume,
@@ -1940,26 +1784,5 @@ mod tests {
         assert_eq!(clamp_system_audio_gain(-2.0), 0.0);
         assert_eq!(clamp_system_audio_gain(0.85), 0.85);
         assert_eq!(clamp_system_audio_gain(8.0), 2.0);
-    }
-
-    #[test]
-    fn voice_processing_settings_are_sanitized_for_the_realtime_engine() {
-        let settings = VoiceProcessingSettings {
-            target_min_db: 5.0,
-            target_max_db: -90.0,
-            voice_monitor_gain: f32::INFINITY,
-            gate_threshold_db: f32::NAN,
-            compressor_ratio: 200.0,
-            limiter_ceiling_db: 4.0,
-            ..VoiceProcessingSettings::default()
-        }
-        .sanitized();
-
-        assert_eq!(settings.target_min_db, -90.0);
-        assert_eq!(settings.target_max_db, 0.0);
-        assert_eq!(settings.voice_monitor_gain, 0.25);
-        assert_eq!(settings.gate_threshold_db, -55.0);
-        assert_eq!(settings.compressor_ratio, 20.0);
-        assert_eq!(settings.limiter_ceiling_db, 0.0);
     }
 }

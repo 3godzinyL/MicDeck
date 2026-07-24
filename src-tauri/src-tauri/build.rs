@@ -79,7 +79,6 @@ fn run_msvc(vsdev: &Path, working_dir: &Path, cl_command: &str) {
 fn build_native_audio() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let native_dir = manifest_dir.join("../native-audio");
-    let dsp_dir = native_dir.join("dsp");
     let bridge_source = native_dir.join("bridge/src/soundboard_ipc.c");
     let bridge_include = native_dir.join("bridge/include");
     let protocol_include = native_dir.join("protocol");
@@ -98,10 +97,6 @@ fn build_native_audio() {
         native_dir.join("engine/src/default_endpoint.cpp"),
         native_dir.join("bridge/src/windows_audio_control.cpp"),
         native_dir.join("engine/src/main.cpp"),
-        dsp_dir.join("Cargo.toml"),
-        dsp_dir.join("Cargo.lock"),
-        dsp_dir.join("src/lib.rs"),
-        dsp_dir.join("include/micdeck_dsp.h"),
     ];
     for source in watched_sources {
         println!("cargo:rerun-if-changed={}", source.display());
@@ -111,24 +106,6 @@ fn build_native_audio() {
     let dll = out_dir.join("soundboard_ipc.dll");
     let import_library = out_dir.join("soundboard_ipc.lib");
     let engine = out_dir.join("soundboard_audio_engine.exe");
-    let dsp_target = out_dir.join("dsp-target");
-
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let dsp_build = Command::new(cargo)
-        .args(["build", "--release", "--manifest-path"])
-        .arg(dsp_dir.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(&dsp_target)
-        .output()
-        .expect("failed to build the MicDeck DSP static library");
-    if !dsp_build.status.success() {
-        panic!(
-            "MicDeck DSP build failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&dsp_build.stdout),
-            String::from_utf8_lossy(&dsp_build.stderr)
-        );
-    }
-    let dsp_library = dsp_target.join("release/micdeck_dsp.lib");
 
     let bridge_command = format!(
         "cl /nologo /O2 /GL /GS /sdl /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE /LD /I{} /I{} /I{} {} {} {} ole32.lib shell32.lib gdi32.lib user32.lib /link /LTCG /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /OUT:{} /IMPLIB:{}",
@@ -144,14 +121,12 @@ fn build_native_audio() {
     run_msvc(&vsdev, &out_dir, &bridge_command);
 
     let engine_command = format!(
-        "cl /nologo /O2 /GL /GS /sdl /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE /I{} /I{} /I{} {} {} {} {} ole32.lib mmdevapi.lib avrt.lib advapi32.lib bcrypt.lib ntdll.lib userenv.lib ws2_32.lib /link /LTCG /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /SUBSYSTEM:WINDOWS /OUT:{}",
+        "cl /nologo /O2 /GL /GS /sdl /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE /I{} /I{} {} {} {} ole32.lib avrt.lib /link /LTCG /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /SUBSYSTEM:WINDOWS /OUT:{}",
         quoted(&bridge_include),
         quoted(&engine_source),
-        quoted(&dsp_dir.join("include")),
         quoted(&engine_source.join("main.cpp")),
         quoted(&engine_source.join("audio_engine.cpp")),
         quoted(&import_library),
-        quoted(&dsp_library),
         quoted(&engine)
     );
     run_msvc(&vsdev, &out_dir, &engine_command);

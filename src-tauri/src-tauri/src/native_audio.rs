@@ -30,8 +30,6 @@ type SetConfigFn = unsafe extern "C" fn(*const u16, *const u16, *const u16) -> c
 type SetGainsFn = unsafe extern "C" fn(f32, f32) -> c_int;
 type SetMonitorGainFn = unsafe extern "C" fn(f32) -> c_int;
 type SetSystemAudioFn = unsafe extern "C" fn(c_int, f32) -> c_int;
-type SetVoiceProcessingFn =
-    unsafe extern "C" fn(c_int, c_int, c_int, f32, f32, c_int, f32, c_int, f32, f32, f32) -> c_int;
 type PushAudioFn = unsafe extern "C" fn(*const f32, u32, u32) -> u32;
 type ClearAudioFn = unsafe extern "C" fn();
 type GetStatusFn = unsafe extern "C" fn(*mut RawStatus) -> c_int;
@@ -54,13 +52,6 @@ struct RawStatus {
     microphone_level: f32,
     system_level: f32,
     mixed_level: f32,
-    microphone_input_level: f32,
-    microphone_output_level: f32,
-    system_input_level: f32,
-    system_output_level: f32,
-    voice_probability: f32,
-    microphone_applied_gain: f32,
-    system_applied_gain: f32,
     underruns: u32,
     capture_overruns: u32,
     dropped_audio_frames: u32,
@@ -78,13 +69,6 @@ impl Default for RawStatus {
             microphone_level: 0.0,
             system_level: 0.0,
             mixed_level: 0.0,
-            microphone_input_level: 0.0,
-            microphone_output_level: 0.0,
-            system_input_level: 0.0,
-            system_output_level: 0.0,
-            voice_probability: 0.0,
-            microphone_applied_gain: 1.0,
-            system_applied_gain: 1.0,
             underruns: 0,
             capture_overruns: 0,
             dropped_audio_frames: 0,
@@ -103,13 +87,6 @@ pub struct EngineStatus {
     pub microphone_level: f32,
     pub system_level: f32,
     pub mixed_level: f32,
-    pub microphone_input_level: f32,
-    pub microphone_output_level: f32,
-    pub system_input_level: f32,
-    pub system_output_level: f32,
-    pub voice_probability: f32,
-    pub microphone_applied_gain: f32,
-    pub system_applied_gain: f32,
     pub underruns: u32,
     pub capture_overruns: u32,
     pub dropped_audio_frames: u32,
@@ -121,7 +98,6 @@ pub struct EngineStatus {
 #[derive(Clone, Copy)]
 struct RawAudioSession {
     session_key: u64,
-    process_id: u32,
     peak_level: f32,
     volume: f32,
     muted: i32,
@@ -134,7 +110,6 @@ impl Default for RawAudioSession {
     fn default() -> Self {
         Self {
             session_key: 0,
-            process_id: 0,
             peak_level: 0.0,
             volume: 1.0,
             muted: 0,
@@ -148,7 +123,6 @@ impl Default for RawAudioSession {
 #[derive(Debug, Clone)]
 pub struct AudioSession {
     pub id: String,
-    pub process_id: u32,
     pub name: String,
     pub peak_level: f32,
     pub volume: f32,
@@ -166,7 +140,6 @@ struct Bridge {
     set_gains: SetGainsFn,
     set_monitor_gain: SetMonitorGainFn,
     set_system_audio: SetSystemAudioFn,
-    set_voice_processing: SetVoiceProcessingFn,
     push_audio: PushAudioFn,
     clear_audio: ClearAudioFn,
     get_status: GetStatusFn,
@@ -207,9 +180,6 @@ impl Bridge {
             set_system_audio: *library
                 .get(b"sb_set_system_audio\0")
                 .map_err(|error| format!("Brak sb_set_system_audio w native DLL: {error}"))?,
-            set_voice_processing: *library
-                .get(b"sb_set_voice_processing\0")
-                .map_err(|error| format!("Brak konfiguracji DSP w native DLL: {error}"))?,
             push_audio: *library
                 .get(b"sb_push_audio\0")
                 .map_err(|error| format!("Brak sb_push_audio w native DLL: {error}"))?,
@@ -294,24 +264,6 @@ impl Bridge {
         }
     }
 
-    fn set_voice_processing(&self, config: VoiceProcessingConfig) {
-        unsafe {
-            (self.set_voice_processing)(
-                i32::from(config.aec_enabled),
-                i32::from(config.rnnoise_enabled),
-                i32::from(config.auto_level_enabled),
-                config.target_min_db,
-                config.target_max_db,
-                i32::from(config.voice_monitor_enabled),
-                config.voice_monitor_gain,
-                i32::from(config.noise_gate_enabled),
-                config.gate_threshold_db,
-                config.compressor_ratio,
-                config.limiter_ceiling_db,
-            );
-        }
-    }
-
     fn clear_audio(&self) {
         unsafe { (self.clear_audio)() }
     }
@@ -344,13 +296,6 @@ impl Bridge {
             microphone_level: raw.microphone_level,
             system_level: raw.system_level,
             mixed_level: raw.mixed_level,
-            microphone_input_level: raw.microphone_input_level,
-            microphone_output_level: raw.microphone_output_level,
-            system_input_level: raw.system_input_level,
-            system_output_level: raw.system_output_level,
-            voice_probability: raw.voice_probability,
-            microphone_applied_gain: raw.microphone_applied_gain,
-            system_applied_gain: raw.system_applied_gain,
             underruns: raw.underruns,
             capture_overruns: raw.capture_overruns,
             dropped_audio_frames: raw.dropped_audio_frames,
@@ -377,7 +322,6 @@ impl Bridge {
                     .unwrap_or(session.name.len());
                 AudioSession {
                     id: session.session_key.to_string(),
-                    process_id: session.process_id,
                     name: String::from_utf16_lossy(&session.name[..name_length]),
                     peak_level: session.peak_level.clamp(0.0, 1.5),
                     volume: session.volume.clamp(0.0, 1.0),
@@ -477,22 +421,6 @@ pub struct NativeAudioConfig<'a> {
     pub sound_gain: f32,
     pub system_audio_enabled: bool,
     pub system_audio_gain: f32,
-    pub voice_processing: VoiceProcessingConfig,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct VoiceProcessingConfig {
-    pub aec_enabled: bool,
-    pub rnnoise_enabled: bool,
-    pub auto_level_enabled: bool,
-    pub target_min_db: f32,
-    pub target_max_db: f32,
-    pub voice_monitor_enabled: bool,
-    pub voice_monitor_gain: f32,
-    pub noise_gate_enabled: bool,
-    pub gate_threshold_db: f32,
-    pub compressor_ratio: f32,
-    pub limiter_ceiling_db: f32,
 }
 
 impl NativeAudioEngine {
@@ -544,7 +472,6 @@ impl NativeAudioEngine {
             .set_gains(config.microphone_gain, config.sound_gain);
         self.bridge
             .set_system_audio(config.system_audio_enabled, config.system_audio_gain);
-        self.bridge.set_voice_processing(config.voice_processing);
         Ok(())
     }
 
@@ -558,10 +485,6 @@ impl NativeAudioEngine {
 
     pub fn set_system_audio(&self, enabled: bool, gain: f32) {
         self.bridge.set_system_audio(enabled, gain);
-    }
-
-    pub fn set_voice_processing(&self, config: VoiceProcessingConfig) {
-        self.bridge.set_voice_processing(config);
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -758,17 +681,5 @@ mod tests {
         assert_eq!(&ENGINE_EXE_BYTES[..2], b"MZ");
         assert!(IPC_DLL_BYTES.len() > 32_000);
         assert!(ENGINE_EXE_BYTES.len() > 64_000);
-    }
-
-    #[test]
-    fn audio_session_abi_matches_the_native_bridge() {
-        assert_eq!(std::mem::size_of::<RawAudioSession>(), 296);
-        assert_eq!(std::mem::align_of::<RawAudioSession>(), 8);
-        assert_eq!(std::mem::offset_of!(RawAudioSession, process_id), 8);
-        assert_eq!(
-            std::mem::offset_of!(RawAudioSession, last_active_age_ms),
-            32
-        );
-        assert_eq!(std::mem::offset_of!(RawAudioSession, name), 40);
     }
 }
