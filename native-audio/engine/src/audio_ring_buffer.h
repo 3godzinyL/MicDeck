@@ -39,6 +39,12 @@ public:
         return popped;
     }
 
+    uint32_t available_read() const noexcept {
+        const uint64_t read = read_frame_.load(std::memory_order_relaxed);
+        const uint64_t write = write_frame_.load(std::memory_order_acquire);
+        return static_cast<uint32_t>(std::min<uint64_t>(write - read, capacity_));
+    }
+
     void clear() noexcept {
         read_frame_.store(write_frame_.load(std::memory_order_acquire), std::memory_order_release);
     }

@@ -1,9 +1,8 @@
 // Standalone, hardware-free self-test of the MicDeck audio core.
 //
-// It exercises the lock-free ring buffer used for the IPC bridge and the
-// monitor tap, and re-implements the exact mixer/limiter/overdrive/monitor
-// math from audio_engine.cpp to prove that a bind actually produces an
-// audible, bounded signal before the real app ever touches a device.
+// It exercises the lock-free ring buffer used for the IPC bridge and monitor
+// taps, plus the safety properties of the mixer, process-bus gain, aggregate
+// fallback, final limiter, and local monitor before a real device is opened.
 //
 // Build + run are driven by scripts/diagnose.sh. Exit code 0 = everything OK.
 
@@ -34,9 +33,20 @@ bool nearly(float a, float b, float epsilon = 1e-4f) {
     return std::fabs(a - b) <= epsilon;
 }
 
-// Mirrors AudioEngine::render_mix: mixed = tanh(mic*micGain + sound*soundGain).
+float db_to_linear(float value) {
+    return std::pow(10.0f, value / 20.0f);
+}
+
+// Mirrors the hard safety bound at the end of AudioEngine::render_mix. The
+// production engine also applies a stateful attack/release gain before this
+// clamp, which can only reduce the magnitude further.
+float limit_sample(float sum, float ceiling_db = -1.0f) {
+    const float ceiling = db_to_linear(ceiling_db);
+    return std::fmax(-ceiling, std::fmin(sum, ceiling));
+}
+
 float mix_sample(float mic, float sound, float mic_gain, float sound_gain) {
-    return std::tanh(mic * mic_gain + sound * sound_gain);
+    return limit_sample(mic * mic_gain + sound * sound_gain);
 }
 
 float mix_with_system(
@@ -46,10 +56,17 @@ float mix_with_system(
     float mic_gain,
     float sound_gain,
     float system_gain) {
-    return std::tanh(
+    return limit_sample(
         mic * mic_gain +
         sound * sound_gain +
         system * system_gain);
+}
+
+float select_desktop_bus(
+    float aggregate,
+    float private_process_mix,
+    bool private_mix_ready) {
+    return private_mix_ready ? private_process_mix : aggregate;
 }
 
 // Mirrors AudioEngine::render_monitor: monitor = tanh(sound*monitorGain).
@@ -113,7 +130,7 @@ void test_ring_buffer_clear() {
 }
 
 void test_mixer_math() {
-    std::printf("Mixer / limiter / overdrive math\n");
+    std::printf("Mixer / limiter / private process-bus math\n");
     check(nearly(mix_sample(0.0f, 0.0f, 1.0f, 1.0f), 0.0f), "silence in -> silence out");
 
     const float voice_only = mix_sample(0.4f, 0.0f, 1.0f, 1.0f);
@@ -122,10 +139,10 @@ void test_mixer_math() {
     const float bind_only = mix_sample(0.0f, 0.5f, 1.0f, 1.0f);
     check(std::fabs(bind_only) > 0.001f, "bind is audible in the mix");
 
-    // Overdrive: soundGain = volume(6.0) * overdrive(4.0) = 24.0 -> heavy saturation.
+    // Extreme gain must hit the configured safety ceiling.
     const float driven = mix_sample(0.0f, 0.5f, 1.0f, 24.0f);
-    check(std::fabs(driven) > 0.9f, "overdrive saturates toward full scale");
-    check(std::fabs(driven) <= 1.0f, "limiter keeps overdrive bounded (no digital clip)");
+    check(nearly(std::fabs(driven), db_to_linear(-1.0f)), "extreme gain reaches the limiter ceiling");
+    check(std::fabs(driven) < 1.0f, "limiter remains below digital full scale");
 
     const float desktop_only = mix_with_system(0.0f, 0.0f, 0.4f, 1.0f, 1.0f, 0.85f);
     check(std::fabs(desktop_only) > 0.001f, "system-audio loopback is audible when enabled");
@@ -133,13 +150,24 @@ void test_mixer_math() {
     const float all_sources = mix_with_system(0.3f, 0.4f, 0.5f, 1.0f, 1.5f, 0.85f);
     check(std::fabs(all_sources) <= 1.0f, "three-source mix remains bounded");
 
-    // The soft limiter must never exceed +-1 even for absurd input.
+    const float private_source = 0.5f * 0.4f;
+    check(nearly(private_source, 0.2f), "application gain changes the private stream copy");
+    check(nearly(0.5f, 0.5f), "application gain leaves the Windows listening copy untouched");
+    check(
+        nearly(select_desktop_bus(0.45f, private_source, false), 0.45f),
+        "aggregate fallback preserves audio while a private capture is unavailable");
+    check(
+        nearly(select_desktop_bus(0.45f, private_source, true), 0.2f),
+        "ready private process mix applies the requested stream level");
+
+    // The limiter must never exceed the configured -1 dBFS ceiling.
     bool bounded = true;
+    const float ceiling = db_to_linear(-1.0f);
     for (float s = -2.0f; s <= 2.0f; s += 0.05f) {
         const float m = mix_sample(s, s, 6.0f, 24.0f);
-        bounded = bounded && (m >= -1.0f && m <= 1.0f);
+        bounded = bounded && (m >= -ceiling && m <= ceiling);
     }
-    check(bounded, "tanh limiter is bounded over the whole input range");
+    check(bounded, "final limiter is bounded over the whole input range");
 }
 
 void test_monitor_tap() {

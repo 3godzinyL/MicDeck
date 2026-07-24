@@ -36,6 +36,30 @@ static LONG clamp_level(float value) {
     return (LONG)(value * 1000.0f + 0.5f);
 }
 
+static LONG clamp_db_centi(float value, float fallback) {
+    if (!isfinite(value)) {
+        value = fallback;
+    }
+    if (value < -90.0f) {
+        value = -90.0f;
+    } else if (value > 0.0f) {
+        value = 0.0f;
+    }
+    return (LONG)(value * 100.0f - 0.5f);
+}
+
+static LONG clamp_ratio_milli(float value) {
+    if (!isfinite(value)) {
+        value = 3.0f;
+    }
+    if (value < 1.0f) {
+        value = 1.0f;
+    } else if (value > 20.0f) {
+        value = 20.0f;
+    }
+    return (LONG)(value * 1000.0f + 0.5f);
+}
+
 static LONG atomic_read(volatile LONG* value) {
     return InterlockedCompareExchange(value, 0, 0);
 }
@@ -106,6 +130,14 @@ int __cdecl sb_open(int create_session) {
         g_state->mic_gain_milli = 1000;
         g_state->sound_gain_milli = 1000;
         g_state->system_gain_milli = 850;
+        g_state->target_min_db_centi = -1900;
+        g_state->target_max_db_centi = -1300;
+        g_state->voice_monitor_gain_milli = 250;
+        g_state->gate_threshold_db_centi = -5500;
+        g_state->compressor_ratio_milli = 3000;
+        g_state->limiter_ceiling_db_centi = -100;
+        g_state->mic_applied_gain_milli = 1000;
+        g_state->system_applied_gain_milli = 1000;
         MemoryBarrier();
     }
 
@@ -141,6 +173,13 @@ int __cdecl sb_reset_session(void) {
     InterlockedExchange(&g_state->mic_level_milli, 0);
     InterlockedExchange(&g_state->system_level_milli, 0);
     InterlockedExchange(&g_state->mix_level_milli, 0);
+    InterlockedExchange(&g_state->mic_input_level_milli, 0);
+    InterlockedExchange(&g_state->mic_output_level_milli, 0);
+    InterlockedExchange(&g_state->system_input_level_milli, 0);
+    InterlockedExchange(&g_state->system_output_level_milli, 0);
+    InterlockedExchange(&g_state->voice_probability_milli, 0);
+    InterlockedExchange(&g_state->mic_applied_gain_milli, 1000);
+    InterlockedExchange(&g_state->system_applied_gain_milli, 1000);
     InterlockedExchange(&g_state->underruns, 0);
     InterlockedExchange(&g_state->capture_overruns, 0);
     InterlockedExchange(&g_state->dropped_audio_frames, 0);
@@ -258,6 +297,194 @@ void __cdecl sb_get_system_audio(int* enabled, float* gain) {
     }
 }
 
+int __cdecl sb_set_stream_sources(const SbStreamSource* sources, uint32_t count) {
+    uint32_t index;
+    if (g_state == NULL || (sources == NULL && count != 0)) {
+        return 0;
+    }
+    if (count > SB_STREAM_SOURCE_CAPACITY) {
+        count = SB_STREAM_SOURCE_CAPACITY;
+    }
+
+    AcquireSRWLockExclusive(&g_config_write_lock);
+    InterlockedIncrement(&g_state->stream_sources_sequence);
+    MemoryBarrier();
+    for (index = 0; index < count; ++index) {
+        const float gain = fmaxf(0.0f, fminf(sources[index].gain, 1.0f));
+        InterlockedExchange64(
+            &g_state->stream_sources[index].session_key,
+            (LONG64)sources[index].session_key);
+        InterlockedExchange(
+            &g_state->stream_sources[index].process_id,
+            (LONG)sources[index].process_id);
+        InterlockedExchange(
+            &g_state->stream_sources[index].gain_milli,
+            (LONG)(gain * 1000.0f + 0.5f));
+        InterlockedExchange(
+            &g_state->stream_sources[index].active,
+            sources[index].active != 0 ? 1 : 0);
+    }
+    for (; index < SB_STREAM_SOURCE_CAPACITY; ++index) {
+        InterlockedExchange64(&g_state->stream_sources[index].session_key, 0);
+        InterlockedExchange(&g_state->stream_sources[index].process_id, 0);
+        InterlockedExchange(&g_state->stream_sources[index].gain_milli, 1000);
+        InterlockedExchange(&g_state->stream_sources[index].active, 0);
+    }
+    InterlockedExchange(&g_state->stream_source_count, (LONG)count);
+    MemoryBarrier();
+    InterlockedIncrement(&g_state->stream_sources_sequence);
+    InterlockedIncrement(&g_state->stream_sources_generation);
+    ReleaseSRWLockExclusive(&g_config_write_lock);
+    return 1;
+}
+
+uint32_t __cdecl sb_get_stream_sources(
+    SbStreamSource* sources,
+    uint32_t capacity) {
+    uint32_t count;
+    uint32_t index;
+    if (g_state == NULL) {
+        return 0;
+    }
+    for (;;) {
+        const LONG sequence_before = atomic_read(&g_state->stream_sources_sequence);
+        LONG sequence_after;
+        if ((sequence_before & 1) != 0) {
+            SwitchToThread();
+            continue;
+        }
+        MemoryBarrier();
+        count = (uint32_t)atomic_read(&g_state->stream_source_count);
+        if (count > SB_STREAM_SOURCE_CAPACITY) {
+            count = SB_STREAM_SOURCE_CAPACITY;
+        }
+        if (sources != NULL && capacity != 0) {
+            const uint32_t copied = count < capacity ? count : capacity;
+            for (index = 0; index < copied; ++index) {
+                sources[index].session_key =
+                    (uint64_t)atomic_read64(&g_state->stream_sources[index].session_key);
+                sources[index].process_id =
+                    (uint32_t)atomic_read(&g_state->stream_sources[index].process_id);
+                sources[index].gain =
+                    atomic_read(&g_state->stream_sources[index].gain_milli) / 1000.0f;
+                sources[index].active =
+                    atomic_read(&g_state->stream_sources[index].active) != 0;
+            }
+        }
+        MemoryBarrier();
+        sequence_after = atomic_read(&g_state->stream_sources_sequence);
+        if (sequence_before == sequence_after && (sequence_after & 1) == 0) {
+            break;
+        }
+    }
+    return sources == NULL || capacity == 0
+        ? count
+        : (count < capacity ? count : capacity);
+}
+
+int __cdecl sb_set_voice_processing(
+    int aec_enabled,
+    int rnnoise_enabled,
+    int auto_level_enabled,
+    float target_min_db,
+    float target_max_db,
+    int voice_monitor_enabled,
+    float voice_monitor_gain,
+    int noise_gate_enabled,
+    float gate_threshold_db,
+    float compressor_ratio,
+    float limiter_ceiling_db) {
+    LONG minimum;
+    LONG maximum;
+    if (g_state == NULL) {
+        return 0;
+    }
+    minimum = clamp_db_centi(target_min_db, -19.0f);
+    maximum = clamp_db_centi(target_max_db, -13.0f);
+    if (minimum > maximum) {
+        LONG temporary = minimum;
+        minimum = maximum;
+        maximum = temporary;
+    }
+    InterlockedExchange(&g_state->aec_enabled, aec_enabled != 0 ? 1 : 0);
+    InterlockedExchange(&g_state->rnnoise_enabled, rnnoise_enabled != 0 ? 1 : 0);
+    InterlockedExchange(&g_state->auto_level_enabled, auto_level_enabled != 0 ? 1 : 0);
+    InterlockedExchange(&g_state->target_min_db_centi, minimum);
+    InterlockedExchange(&g_state->target_max_db_centi, maximum);
+    InterlockedExchange(&g_state->voice_monitor_enabled, voice_monitor_enabled != 0 ? 1 : 0);
+    InterlockedExchange(&g_state->voice_monitor_gain_milli, clamp_milli(voice_monitor_gain));
+    InterlockedExchange(&g_state->noise_gate_enabled, noise_gate_enabled != 0 ? 1 : 0);
+    InterlockedExchange(
+        &g_state->gate_threshold_db_centi,
+        clamp_db_centi(gate_threshold_db, -55.0f));
+    InterlockedExchange(&g_state->compressor_ratio_milli, clamp_ratio_milli(compressor_ratio));
+    InterlockedExchange(
+        &g_state->limiter_ceiling_db_centi,
+        clamp_db_centi(limiter_ceiling_db, -1.0f));
+    return 1;
+}
+
+void __cdecl sb_get_voice_processing(
+    int* aec_enabled,
+    int* rnnoise_enabled,
+    int* auto_level_enabled,
+    float* target_min_db,
+    float* target_max_db,
+    int* voice_monitor_enabled,
+    float* voice_monitor_gain,
+    int* noise_gate_enabled,
+    float* gate_threshold_db,
+    float* compressor_ratio,
+    float* limiter_ceiling_db) {
+    if (aec_enabled != NULL) {
+        *aec_enabled = g_state != NULL && atomic_read(&g_state->aec_enabled) != 0;
+    }
+    if (rnnoise_enabled != NULL) {
+        *rnnoise_enabled = g_state != NULL && atomic_read(&g_state->rnnoise_enabled) != 0;
+    }
+    if (auto_level_enabled != NULL) {
+        *auto_level_enabled = g_state != NULL && atomic_read(&g_state->auto_level_enabled) != 0;
+    }
+    if (target_min_db != NULL) {
+        *target_min_db = g_state == NULL
+            ? -19.0f
+            : atomic_read(&g_state->target_min_db_centi) / 100.0f;
+    }
+    if (target_max_db != NULL) {
+        *target_max_db = g_state == NULL
+            ? -13.0f
+            : atomic_read(&g_state->target_max_db_centi) / 100.0f;
+    }
+    if (voice_monitor_enabled != NULL) {
+        *voice_monitor_enabled =
+            g_state != NULL && atomic_read(&g_state->voice_monitor_enabled) != 0;
+    }
+    if (voice_monitor_gain != NULL) {
+        *voice_monitor_gain = g_state == NULL
+            ? 0.25f
+            : atomic_read(&g_state->voice_monitor_gain_milli) / 1000.0f;
+    }
+    if (noise_gate_enabled != NULL) {
+        *noise_gate_enabled =
+            g_state != NULL && atomic_read(&g_state->noise_gate_enabled) != 0;
+    }
+    if (gate_threshold_db != NULL) {
+        *gate_threshold_db = g_state == NULL
+            ? -55.0f
+            : atomic_read(&g_state->gate_threshold_db_centi) / 100.0f;
+    }
+    if (compressor_ratio != NULL) {
+        *compressor_ratio = g_state == NULL
+            ? 3.0f
+            : atomic_read(&g_state->compressor_ratio_milli) / 1000.0f;
+    }
+    if (limiter_ceiling_db != NULL) {
+        *limiter_ceiling_db = g_state == NULL
+            ? -1.0f
+            : atomic_read(&g_state->limiter_ceiling_db_centi) / 100.0f;
+    }
+}
+
 uint32_t __cdecl sb_push_audio(const float* samples, uint32_t frames, uint32_t channels) {
     LONG64 write_frame;
     LONG64 read_frame;
@@ -356,6 +583,20 @@ int __cdecl sb_get_status(SbStatus* status) {
     status->microphone_level = atomic_read(&g_state->mic_level_milli) / 1000.0f;
     status->system_level = atomic_read(&g_state->system_level_milli) / 1000.0f;
     status->mixed_level = atomic_read(&g_state->mix_level_milli) / 1000.0f;
+    status->microphone_input_level =
+        atomic_read(&g_state->mic_input_level_milli) / 1000.0f;
+    status->microphone_output_level =
+        atomic_read(&g_state->mic_output_level_milli) / 1000.0f;
+    status->system_input_level =
+        atomic_read(&g_state->system_input_level_milli) / 1000.0f;
+    status->system_output_level =
+        atomic_read(&g_state->system_output_level_milli) / 1000.0f;
+    status->voice_probability =
+        atomic_read(&g_state->voice_probability_milli) / 1000.0f;
+    status->microphone_applied_gain =
+        atomic_read(&g_state->mic_applied_gain_milli) / 1000.0f;
+    status->system_applied_gain =
+        atomic_read(&g_state->system_applied_gain_milli) / 1000.0f;
     status->underruns = (uint32_t)atomic_read(&g_state->underruns);
     status->capture_overruns = (uint32_t)atomic_read(&g_state->capture_overruns);
     status->dropped_audio_frames =
@@ -476,6 +717,40 @@ void __cdecl sb_engine_set_levels(
     InterlockedExchange(
         &g_state->latency_us,
         (LONG)(fmaxf(0.0f, fminf(estimated_latency_ms, 1000.0f)) * 1000.0f + 0.5f));
+}
+
+void __cdecl sb_engine_set_processing_levels(
+    float microphone_input_level,
+    float microphone_output_level,
+    float system_input_level,
+    float system_output_level,
+    float voice_probability,
+    float microphone_applied_gain,
+    float system_applied_gain) {
+    if (g_state == NULL) {
+        return;
+    }
+    InterlockedExchange(
+        &g_state->mic_input_level_milli,
+        clamp_level(microphone_input_level));
+    InterlockedExchange(
+        &g_state->mic_output_level_milli,
+        clamp_level(microphone_output_level));
+    InterlockedExchange(
+        &g_state->system_input_level_milli,
+        clamp_level(system_input_level));
+    InterlockedExchange(
+        &g_state->system_output_level_milli,
+        clamp_level(system_output_level));
+    InterlockedExchange(
+        &g_state->voice_probability_milli,
+        clamp_level(voice_probability));
+    InterlockedExchange(
+        &g_state->mic_applied_gain_milli,
+        clamp_milli(microphone_applied_gain));
+    InterlockedExchange(
+        &g_state->system_applied_gain_milli,
+        clamp_milli(system_applied_gain));
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {

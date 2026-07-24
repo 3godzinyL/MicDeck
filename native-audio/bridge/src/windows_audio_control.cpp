@@ -14,6 +14,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -29,6 +30,9 @@
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
+
+static_assert(sizeof(SbAudioSession) == 296u);
+static_assert(alignof(SbAudioSession) == 8u);
 
 namespace {
 
@@ -49,6 +53,7 @@ struct ObservedSession {
     float volume = 1.0f;
     bool muted = false;
     bool active = false;
+    bool rendering = false;
 };
 
 struct SessionHistory {
@@ -57,6 +62,7 @@ struct SessionHistory {
     float volume = 1.0f;
     bool muted = false;
     bool active = false;
+    bool rendering = false;
     uint64_t last_active_tick = 0;
     uint64_t last_seen_tick = 0;
     std::vector<uint8_t> icon_rgba;
@@ -241,16 +247,6 @@ std::vector<uint8_t> extract_icon_rgba(const std::wstring& executable_path) {
     return rgba;
 }
 
-bool desired_volume_for(uint64_t key, float& volume) {
-    std::lock_guard<std::mutex> lock(g_state_mutex);
-    const auto desired = g_desired_volumes.find(key);
-    if (desired == g_desired_volumes.end()) {
-        return false;
-    }
-    volume = desired->second;
-    return true;
-}
-
 void observe_device(
     IMMDevice* device,
     std::unordered_map<uint64_t, ObservedSession>& observed) {
@@ -305,18 +301,8 @@ void observe_device(
         AudioSessionState session_state = AudioSessionStateInactive;
         base_control->GetState(&session_state);
 
-        ComPtr<ISimpleAudioVolume> simple_volume;
         float volume = 1.0f;
         BOOL muted = FALSE;
-        if (SUCCEEDED(base_control.As(&simple_volume))) {
-            float desired = 1.0f;
-            if (desired_volume_for(identity.key, desired)) {
-                simple_volume->SetMasterVolume(desired, nullptr);
-                simple_volume->SetMute(desired <= 0.0001f, nullptr);
-            }
-            simple_volume->GetMasterVolume(&volume);
-            simple_volume->GetMute(&muted);
-        }
 
         auto [entry, inserted] = observed.try_emplace(identity.key);
         if (inserted) {
@@ -330,6 +316,9 @@ void observe_device(
         entry->second.active =
             entry->second.active ||
             (session_state == AudioSessionStateActive && peak >= kActivityThreshold);
+        entry->second.rendering =
+            entry->second.rendering ||
+            session_state == AudioSessionStateActive;
     }
 }
 
@@ -365,6 +354,50 @@ std::unordered_map<uint64_t, ObservedSession> collect_sessions() {
     return observed;
 }
 
+void publish_stream_sources_locked() {
+    std::vector<const SessionHistory*> ordered;
+    ordered.reserve(g_history.size());
+    for (const auto& [_, history] : g_history) {
+        if (history.identity.process_id != 0 &&
+            (history.rendering || std::abs(history.volume - 1.0f) > 0.0005f)) {
+            ordered.push_back(&history);
+        }
+    }
+    std::sort(
+        ordered.begin(),
+        ordered.end(),
+        [](const SessionHistory* left, const SessionHistory* right) {
+            const bool left_custom = std::abs(left->volume - 1.0f) > 0.0005f;
+            const bool right_custom = std::abs(right->volume - 1.0f) > 0.0005f;
+            if (left_custom != right_custom) return left_custom > right_custom;
+            if (left->rendering != right->rendering) return left->rendering > right->rendering;
+            return left->last_active_tick > right->last_active_tick;
+        });
+
+    std::array<SbStreamSource, SB_STREAM_SOURCE_CAPACITY> sources{};
+    const uint32_t count = (std::min)(
+        static_cast<uint32_t>(ordered.size()),
+        static_cast<uint32_t>(sources.size()));
+    for (uint32_t index = 0; index < count; ++index) {
+        const SessionHistory& history = *ordered[index];
+        sources[index].session_key = history.identity.key;
+        sources[index].process_id = history.identity.process_id;
+        sources[index].gain = history.volume;
+        sources[index].active = history.rendering ? 1 : 0;
+    }
+    if (ordered.size() > sources.size()) {
+        // A process mix is only safe when every rendering source is present.
+        // The active sentinel makes the engine retain the aggregate-loopback
+        // fallback instead of silently omitting applications beyond capacity.
+        SbStreamSource& overflow = sources.back();
+        overflow.session_key = UINT64_MAX;
+        overflow.process_id = 0;
+        overflow.gain = 1.0f;
+        overflow.active = 1;
+    }
+    sb_set_stream_sources(sources.data(), count);
+}
+
 bool update_history(std::unordered_map<uint64_t, ObservedSession> observed) {
     const uint64_t now = GetTickCount64();
     bool any_active = false;
@@ -373,7 +406,7 @@ bool update_history(std::unordered_map<uint64_t, ObservedSession> observed) {
     for (auto& [key, session] : observed) {
         const bool has_signal = session.peak >= kActivityThreshold;
         auto existing = g_history.find(key);
-        if (!has_signal && existing == g_history.end()) {
+        if (!has_signal && !session.rendering && existing == g_history.end()) {
             continue;
         }
 
@@ -384,20 +417,24 @@ bool update_history(std::unordered_map<uint64_t, ObservedSession> observed) {
                 extract_icon_rgba(session.identity.executable_path);
         }
         history->second.peak = session.peak;
-        history->second.volume = session.muted ? 0.0f : session.volume;
-        history->second.muted = session.muted;
+        const auto desired = g_desired_volumes.find(key);
+        history->second.volume =
+            desired == g_desired_volumes.end() ? 1.0f : desired->second;
+        history->second.muted = history->second.volume <= 0.0001f;
         history->second.active = session.active;
+        history->second.rendering = session.rendering;
         history->second.last_seen_tick = now;
         if (has_signal) {
             history->second.last_active_tick = now;
-            any_active = true;
         }
+        any_active = any_active || session.rendering || has_signal;
     }
 
     for (auto history = g_history.begin(); history != g_history.end();) {
         if (!observed.contains(history->first)) {
             history->second.peak = 0.0f;
             history->second.active = false;
+            history->second.rendering = false;
             ProcessIdentity current_identity;
             if (query_process_identity(
                     history->second.identity.process_id,
@@ -415,6 +452,7 @@ bool update_history(std::unordered_map<uint64_t, ObservedSession> observed) {
             ++history;
         }
     }
+    publish_stream_sources_locked();
     return any_active;
 }
 
@@ -510,6 +548,7 @@ uint32_t __cdecl sb_get_audio_sessions(
         auto& destination = sessions[index];
         ZeroMemory(&destination, sizeof(destination));
         destination.session_key = source.identity.key;
+        destination.process_id = source.identity.process_id;
         destination.peak_level = source.peak;
         destination.volume = source.volume;
         destination.muted = source.muted ? 1 : 0;
@@ -537,6 +576,7 @@ int __cdecl sb_set_audio_session_volume(uint64_t session_key, float volume) {
     g_desired_volumes[session_key] = volume;
     history->second.volume = volume;
     history->second.muted = volume <= 0.0001f;
+    publish_stream_sources_locked();
     return 1;
 }
 
