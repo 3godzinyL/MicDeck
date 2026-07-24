@@ -64,6 +64,20 @@ No account. No telemetry. No cloud mixer. No code injection or process hooks.
 - **Windows integration** — optional launch at sign-in, close-to-tray behavior, and persistent background routing.
 - **Local-first operation** — live audio never leaves the machine through a MicDeck service.
 
+### Streamer and voice processing
+
+The dedicated **Streamer** workspace turns MicDeck into a controlled broadcast
+front end rather than a simple system-audio switch:
+
+- choose a target dBFS center and tolerance for both voice and desktop audio;
+- compare microphone and desktop levels before and after processing in real time;
+- calibrate normal speech with an adjustable local headphone monitor;
+- run AEC3 and RNNoise before gating, adaptive leveling/compression, and limiting;
+- attenuate individual applications only in the OBS/virtual-cable copy without
+  changing their Windows listening volume;
+- retain the complete aggregate desktop mix as a safe fallback if a private
+  process capture cannot be started.
+
 > [!IMPORTANT]
 > MicDeck is an early public preview. The builds are not code-signed yet, so Windows SmartScreen may display an unknown-publisher warning. Download releases only from this repository and verify the supplied `SHA256SUMS.txt`.
 
@@ -84,11 +98,19 @@ No account. No telemetry. No cloud mixer. No code injection or process hooks.
   </tr>
   <tr>
     <td colspan="2">
-      <img src="docs/micdeck-settings-en.png" alt="MicDeck Settings with virtual microphone, native engine, autostart, tray, and Discord guidance">
+      <img src="docs/micdeck-streamer-en.png" alt="MicDeck Streamer console with voice and desktop dBFS meters, adaptive level matching, live calibration, and OBS output controls">
     </td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><strong>Windows integration</strong><br><sub>Virtual device setup, engine diagnostics, autostart, system tray, and Discord guidance.</sub></td>
+    <td colspan="2" align="center"><strong>Streamer console</strong><br><sub>Pre/post-DSP meters, target range, headphone calibration, microphone filters, and stream-bus gains.</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2">
+      <img src="docs/micdeck-filters-en.png" alt="MicDeck Audio filters settings with AEC3, RNNoise, smart gate, compressor, limiter, and processing-order diagram">
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><strong>Audio filter settings</strong><br><sub>Persistent voice cleanup, dynamics, safety ceiling, and an explicit real-time processing order.</sub></td>
   </tr>
 </table>
 

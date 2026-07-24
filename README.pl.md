@@ -46,6 +46,20 @@ MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komun
 - **Dwa języki:** cały interfejs przełącza się między polskim i angielskim z prawego górnego rogu.
 - **Local-first:** bez konta, telemetrii, chmury, wstrzykiwania DLL i hooków procesów.
 
+### Tryb Streamer i obróbka głosu
+
+Osobna zakładka **Streamer** zmienia MicDeck w kontrolowany front-end
+transmisji, a nie tylko przełącznik dźwięku systemowego:
+
+- ustawiasz środek oraz tolerancję docelowego zakresu dBFS dla głosu i pulpitu;
+- porównujesz na żywo poziomy mikrofonu i system audio przed oraz po obróbce;
+- kalibrujesz normalną mowę z regulowanym odsłuchem lokalnym w słuchawkach;
+- AEC3 i RNNoise działają przed gate'em, adaptacyjnym levelerem/kompresorem i limiterem;
+- poziomy pojedynczych aplikacji zmieniają tylko kopię dla OBS/wirtualnego kabla,
+  bez naruszania odsłuchu Windows;
+- pełny miks pulpitu pozostaje bezpiecznym fallbackiem, gdy prywatny loopback
+  procesu nie może wystartować.
+
 > [!NOTE]
 > MicDeck jest obecnie publiczną wersją preview dla Windows 10/11 x64. Binariów jeszcze nie podpisano certyfikatem, dlatego Windows SmartScreen może pokazać ostrzeżenie. Pobieraj aplikację wyłącznie z tego repozytorium i sprawdzaj plik `SHA256SUMS.txt`.
 
@@ -61,10 +75,16 @@ MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komun
     <td align="center"><strong>Studio live</strong><br><sub>Mikrofon, system audio, mierniki, monitoring i status trasy.</sub></td>
   </tr>
   <tr>
-    <td colspan="2"><img src="docs/micdeck-settings-en.png" alt="Ustawienia MicDeck z autostartem i zasobnikiem systemowym"></td>
+    <td colspan="2"><img src="docs/micdeck-streamer-en.png" alt="Konsola Streamer w MicDeck z miernikami dBFS głosu i pulpitu, adaptacyjnym wyrównaniem, kalibracją live oraz sterowaniem wyjściem OBS"></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><strong>Integracja z Windows</strong><br><sub>Wirtualny mikrofon, diagnostyka silnika, autostart, tray i instrukcja Discorda.</sub></td>
+    <td colspan="2" align="center"><strong>Konsola Streamer</strong><br><sub>Mierniki przed i po DSP, zakres docelowy, kalibracja słuchawkowa, filtry mikrofonu oraz gain magistrali streamu.</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/micdeck-filters-en.png" alt="Ustawienia filtrów audio MicDeck z AEC3, RNNoise, smart gate, kompresorem, limiterem i schematem kolejności obróbki"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><strong>Ustawienia filtrów audio</strong><br><sub>Trwałe ustawienia oczyszczania głosu, dynamiki, limitera bezpieczeństwa i jawna kolejność obróbki realtime.</sub></td>
   </tr>
 </table>
 
