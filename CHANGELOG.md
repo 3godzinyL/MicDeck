@@ -12,8 +12,16 @@ All notable MicDeck changes are documented here. The project follows
 
 ### Added
 
+- Dedicated bilingual Streamer console with pre/post-processing dBFS meters,
+  configurable target range, live headphone calibration, and OBS output metering
+- Persistent WebRTC AEC3 and RNNoise processing followed by a smart gate,
+  adaptive leveler/compressor, and final limiter in the native 48 kHz audio path
+- Private per-process WASAPI loopback bus for application levels that affect only
+  the virtual-cable mix, with aggregate-loopback fallback and click-free crossfade
+- General and Audio filters settings sections with persistent filter tuning
+- Microphone AEC3 and RNNoise switches directly in Live Studio
 - Live Studio application-audio activity rack with recency sorting, executable icons,
-  live signal meters, and per-session volume controls
+  live signal meters, and per-application virtual-cable level controls
 - Continuous low-overhead Core Audio session monitoring, including recent activity
   history for minimized and temporarily silent applications
 - Windows default microphone repair action for all capture roles
@@ -26,7 +34,8 @@ All notable MicDeck changes are documented here. The project follows
 
 ### Changed
 
-- Native audio protocol upgraded to version 5 with atomic configuration snapshots
+- Native audio protocol upgraded to version 7 with atomic configuration snapshots,
+  voice-processing state, detailed DSP meters, and fixed-capacity process-source routing
 - Native bootstrap no longer installs drivers or changes the Windows default
   microphone during application startup
 - Expensive native initialization now runs outside the UI startup path
@@ -40,6 +49,9 @@ All notable MicDeck changes are documented here. The project follows
 
 ### Fixed
 
+- Application level controls no longer modify the Windows listening volume
+- System-audio enable and gain controls now operate exclusively on the outgoing
+  virtual-cable route
 - Persisted configuration replacement is now atomic
 - Audio-ring and IPC buffer loss is observable instead of being silently discarded
 - Loopback startup warnings are retained and exposed to diagnostics

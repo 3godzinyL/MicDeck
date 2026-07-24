@@ -51,12 +51,15 @@ No account. No telemetry. No cloud mixer. No code injection or process hooks.
 
 ### Features
 
-- **System audio in one click** — route a browser, Spotify, a game, or the complete Windows render mix into voice chat.
+- **Streamer console** — match microphone and desktop audio to one configurable dBFS range before the combined signal reaches OBS.
+- **Private application levels** — attenuate or mute a browser, Spotify, or a game only in MicDeck's virtual-cable mix without changing the Windows listening volume.
+- **Production voice chain** — WebRTC AEC3, RNNoise, a smart gate, adaptive leveling/compression, and a final limiter run in the native audio process.
 - **Sound pads** — import and play MP3, WAV, FLAC, OGG, AAC, and M4A files.
 - **Per-sound global hotkeys** — record combinations such as `Alt+P` and trigger clips while MicDeck is hidden in the tray.
 - **Quick Capture** — add audio from supported YouTube, YouTube Shorts, and TikTok URLs.
 - **Responsive imports** — downloads, decoding, and metadata analysis run outside the UI thread.
 - **Live Studio** — control microphone, pad, system-audio, and monitoring levels from one view.
+- **Live calibration** — compare pre/post-filter meters, voice probability, adaptive gain, and the final OBS output while monitoring through headphones.
 - **Visible diagnostics** — inspect negotiated latency, signal levels, engine state, process ID, and underruns.
 - **Windows integration** — optional launch at sign-in, close-to-tray behavior, and persistent background routing.
 - **Local-first operation** — live audio never leaves the machine through a MicDeck service.
@@ -126,10 +129,15 @@ Closing the main window keeps MicDeck in the Windows notification area and does 
 ```mermaid
 flowchart LR
   mic["Physical microphone"] --> capture["Event-driven WASAPI capture"]
-  desktop["Default Windows output"] --> loopback["WASAPI loopback"]
+  desktop["Default Windows output"] --> loopback["Aggregate loopback / AEC reference"]
+  apps["Rendering applications"] --> process["Private process loopbacks"]
   pads["Sound pads"] --> ipc["Versioned shared-memory IPC"]
-  capture --> mixer["Native C++ mixer"]
-  loopback --> mixer
+  loopback --> dsp["AEC3 → RNNoise → gate → leveler"]
+  capture --> dsp
+  dsp --> mixer["Native C++ mixer + limiter"]
+  loopback --> desktopbus["Adaptive desktop leveler"]
+  process --> desktopbus
+  desktopbus --> mixer
   ipc --> mixer
   mixer --> cable["VB-CABLE virtual endpoint"]
   cable --> chat["Discord · games · OBS · calls"]
@@ -161,12 +169,13 @@ This section is deliberately explicit. These are preview boundaries, not hidden 
 
 | Area | What v0.1 currently does |
 | --- | --- |
-| System capture | Captures the complete default Windows render mix. Studio continuously discovers applications that emitted audio, keeps recent activity, and controls each Windows audio session independently. |
+| System capture | Keeps aggregate Windows loopback warm for AEC and fallback. When an application level differs from 100%, MicDeck builds a private process-loopback bus and applies the level only to the virtual-cable copy. Windows listening levels are never mutated. |
 | WASAPI mode | Uses adaptive shared mode. Exclusive-mode access is not claimed. |
 | Monitoring | Local sound-pad monitoring is muted while system-audio broadcast is active to prevent a feedback loop. The outgoing virtual mix still contains the pads. |
 | Device changes | Engine state and errors are visible in Studio and Settings. A manual **Restart audio engine** action is available when a device or driver is reconfigured. |
 | Default microphone | MicDeck no longer overwrites the Windows default input automatically. Settings includes an explicit repair action that restores the selected physical microphone for Console, Multimedia, and Communications roles. |
-| DSP | The preview provides gain control and soft saturation. It does not yet include VST hosting, noise suppression, a noise gate, or a full mastering chain. |
+| DSP | The microphone path runs AEC3, RNNoise, an optional smart gate, adaptive range matching/compression, and a final limiter at 48 kHz. Filter state is persistent and toggles crossfade over 150 ms. VST hosting is not included. |
+| Process-loopback compatibility | Per-application stream levels require Windows 10 build 20348 or newer. On unsupported systems or capture failure, MicDeck retains the aggregate system mix instead of dropping a source. |
 | Distribution | Binaries and checksums are published, but Authenticode signing and automatic updates remain roadmap items. |
 | Architecture | Windows x64 only. No macOS, Linux, ARM64, mobile remote, Stream Deck, or MIDI support is claimed in this release. |
 

@@ -33,7 +33,9 @@
 
 MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komunikatorów w jednej aplikacji. Prosty interfejs działa na Tauri i Rust, a krytyczną ścieżkę audio obsługuje osobny silnik C++/WASAPI.
 
-- **Dźwięk systemu jednym kliknięciem:** cały domyślny miks Windows, w tym przeglądarka, Spotify i gry, trafia do Discorda.
+- **Konsola streamera:** mikrofon i dźwięk pulpitu są dopasowywane do jednego ustawianego zakresu dBFS przed wysłaniem miksu do OBS.
+- **Prywatne poziomy aplikacji:** przeglądarkę, Spotify lub grę można ściszyć tylko w kopii wysyłanej na wirtualny kabel, bez zmiany odsłuchu i głośności Windows.
+- **Produkcyjny tor głosu:** WebRTC AEC3, RNNoise, smart gate, adaptacyjne wyrównanie/kompresja i limiter działają w natywnym procesie audio.
 - **Szybki soundboard:** MP3, WAV, FLAC, OGG, AAC i M4A na czytelnym live decku.
 - **Globalny bind dla każdego dźwięku:** ustaw np. `Alt+P` i odpal klip nawet wtedy, gdy MicDeck jest schowany w trayu.
 - **Quick Capture:** wklej YouTube, Shorts albo TikTok i dodaj audio do biblioteki.
@@ -106,10 +108,15 @@ Pobieraj i udostępniaj wyłącznie materiały, do których masz prawa. MicDeck 
 ```mermaid
 flowchart LR
   mic["Fizyczny mikrofon"] --> capture["WASAPI capture"]
-  desktop["Dźwięk systemu"] --> loopback["WASAPI loopback"]
+  desktop["Dźwięk systemu"] --> loopback["Zbiorczy loopback / referencja AEC"]
+  apps["Aktywne aplikacje"] --> process["Prywatne loopbacki procesów"]
   pads["Pady dźwiękowe"] --> ipc["Lock-free IPC"]
-  capture --> mixer["Mikser C++ real-time"]
-  loopback --> mixer
+  loopback --> dsp["AEC3 → RNNoise → gate → leveler"]
+  capture --> dsp
+  dsp --> mixer["Mikser C++ real-time + limiter"]
+  loopback --> desktopbus["Adaptacyjne wyrównanie pulpitu"]
+  process --> desktopbus
+  desktopbus --> mixer
   ipc --> mixer
   mixer --> cable["Zarządzany wirtualny kabel"]
   cable --> chat["Discord · gry · OBS · rozmowy"]
@@ -125,12 +132,13 @@ Ta sekcja celowo opisuje granice wersji preview:
 
 | Obszar | Stan w v0.1 |
 | --- | --- |
-| Przechwytywanie systemu | Przechwytywany jest cały domyślny miks Windows. Studio wykrywa aplikacje, które faktycznie wydały dźwięk, zachowuje historię aktywności i pozwala regulować ich sesje audio. |
+| Przechwytywanie systemu | Zbiorczy loopback Windows pozostaje aktywny jako referencja AEC i bezpieczny fallback. Po zmianie poziomu aplikacji MicDeck tworzy prywatną magistralę loopbacków procesów i reguluje wyłącznie kopię wysyłaną na kabel. Głośność odsłuchu Windows nie jest zmieniana. |
 | Tryb WASAPI | Adaptacyjny shared mode; projekt nie deklaruje exclusive mode. |
 | Monitoring | Przy aktywnym udostępnianiu systemu lokalny odsłuch padów jest wyciszany, aby uniknąć pętli. Pady nadal trafiają do miksu wyjściowego. |
 | Zmiana urządzeń | Studio i Ustawienia pokazują stan oraz błędy silnika. Po zmianie konfiguracji dostępny jest ręczny restart silnika audio. |
 | Domyślny mikrofon | MicDeck nie nadpisuje już automatycznie domyślnego wejścia Windows. Ustawienia zawierają ręczną naprawę, która przywraca wybrany fizyczny mikrofon dla ról Console, Multimedia i Communications. |
-| DSP | Regulacja gainu i łagodna saturacja. Brak hosta VST, odszumiania, noise gate'a i pełnego chainu masteringowego. |
+| DSP | Tor mikrofonu zawiera AEC3, RNNoise, opcjonalny smart gate, adaptacyjne dopasowanie zakresu/kompresję oraz limiter przy 48 kHz. Stan filtrów jest trwały, a przełączanie ma 150 ms crossfade. Brak hosta VST. |
+| Zgodność loopbacku procesów | Poziomy pojedynczych aplikacji wymagają Windows 10 build 20348 lub nowszego. Na starszym systemie albo po błędzie przechwytywania MicDeck zachowuje pełny miks zbiorczy, zamiast zgubić źródło. |
 | Dystrybucja | Buildy mają sumy kontrolne, ale nie mają jeszcze podpisu Authenticode ani automatycznych aktualizacji. |
 | Platformy | Windows x64. Brak deklarowanego wsparcia macOS, Linux, ARM64, Stream Deck i MIDI. |
 

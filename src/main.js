@@ -19,6 +19,7 @@ function storedBoolean(key, fallback = false) {
 
 const state = {
   activeView: 'library',
+  settingsSection: 'general',
   language: initialLanguage(),
   autostartEnabled: false,
   isUpdatingAutostart: false,
@@ -32,6 +33,19 @@ const state = {
   monitorGain: 0,
   systemAudioEnabled: false,
   systemAudioGain: 0.85,
+  voiceProcessing: {
+    aecEnabled: false,
+    rnnoiseEnabled: false,
+    autoLevelEnabled: false,
+    targetMinDb: -19,
+    targetMaxDb: -13,
+    voiceMonitorEnabled: false,
+    voiceMonitorGain: 0.25,
+    noiseGateEnabled: false,
+    gateThresholdDb: -55,
+    compressorRatio: 3,
+    limiterCeilingDb: -1
+  },
   audioSessions: [],
   nativeAudio: {
     available: false,
@@ -42,6 +56,13 @@ const state = {
     microphoneLevel01: 0,
     systemLevel01: 0,
     mixedLevel01: 0,
+    microphoneInputLevel01: 0,
+    microphoneOutputLevel01: 0,
+    systemInputLevel01: 0,
+    systemOutputLevel01: 0,
+    voiceProbability01: 0,
+    microphoneAppliedGain: 1,
+    systemAppliedGain: 1,
     estimatedLatencyMs: 0,
     underruns: 0,
     captureOverruns: 0,
@@ -89,6 +110,7 @@ const state = {
 let playbackTimer = null;
 let audioSessionTimer = null;
 let toastTimer = null;
+let voiceProcessingTimer = null;
 const sessionVolumeTimers = new Map();
 let renderedLiveId = null;
 let newestSoundIds = new Set();
@@ -99,6 +121,7 @@ let pointerY = window.innerHeight * 0.22;
 const icons = {
   library: '<path d="M4 5.5h16M4 12h16M4 18.5h10"/><circle cx="18" cy="18.5" r="2.5"/>',
   studio: '<path d="M4 8v8M8 5v14M12 9v6M16 3v18M20 7v10"/>',
+  streamer: '<path d="M4 17a8 8 0 0 1 16 0M7 17a5 5 0 0 1 10 0M10 17a2 2 0 0 1 4 0"/><circle cx="12" cy="20" r="1"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.5-1H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.5V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   download: '<path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"/>',
@@ -173,8 +196,21 @@ function dbMeterPercent(db) {
   return Math.round(((Math.max(-60, Math.min(12, db)) + 60) / 72) * 100);
 }
 
+function streamDbMeterPercent(db) {
+  return Math.round(((Math.max(-60, Math.min(0, db)) + 60) / 60) * 100);
+}
+
 function levelPercent(level) {
   return Math.round(Math.max(0, Math.min(1, Number(level) || 0)) * 100);
+}
+
+function levelToDb(level) {
+  const value = Number(level);
+  return value > 0.00003 ? 20 * Math.log10(value) : -90;
+}
+
+function formatGain(value) {
+  return `×${Math.max(0, Number(value) || 0).toFixed(2)}`;
 }
 
 function latencyLabel() {
@@ -443,6 +479,7 @@ async function refreshState() {
     monitorGain,
     systemAudioEnabled,
     systemAudioGain,
+    voiceProcessing,
     playback,
     virtualAudio,
     nativeAudio,
@@ -458,6 +495,7 @@ async function refreshState() {
     invoke('get_monitor_gain'),
     invoke('get_system_audio_enabled'),
     invoke('get_system_audio_gain'),
+    invoke('get_voice_processing_settings'),
     invoke('get_playback_status'),
     invoke('get_virtual_audio_status'),
     invoke('get_native_audio_status'),
@@ -475,6 +513,7 @@ async function refreshState() {
     monitorGain: Number(monitorGain ?? 0),
     systemAudioEnabled: Boolean(systemAudioEnabled),
     systemAudioGain: Number(systemAudioGain ?? 0.85),
+    voiceProcessing,
     playback,
     virtualAudio,
     nativeAudio,
@@ -596,6 +635,28 @@ async function updateGain(command, stateKey, value, selector, formatter = format
   } catch (error) {
     showToast(error, 'error');
   }
+}
+
+async function persistVoiceProcessing() {
+  clearTimeout(voiceProcessingTimer);
+  try {
+    state.voiceProcessing = await invoke('set_voice_processing_settings', {
+      settings: state.voiceProcessing
+    });
+  } catch (error) {
+    showToast(error, 'error');
+  }
+}
+
+function updateVoiceProcessing(patch, { rerender = false, immediate = false } = {}) {
+  Object.assign(state.voiceProcessing, patch);
+  clearTimeout(voiceProcessingTimer);
+  if (immediate) {
+    persistVoiceProcessing();
+  } else {
+    voiceProcessingTimer = setTimeout(persistVoiceProcessing, 90);
+  }
+  if (rerender) render();
 }
 
 function onVolumeChange(value) {
@@ -770,7 +831,7 @@ function navButton(view, label, iconName) {
     <button class="nav-item ${state.activeView === view ? 'is-active' : ''}" data-view="${view}">
       ${icon(iconName)}
       <span>${label}</span>
-      ${view === 'studio' && state.systemAudioEnabled ? '<i class="nav-live-dot"></i>' : ''}
+      ${(view === 'studio' || view === 'streamer') && state.systemAudioEnabled ? '<i class="nav-live-dot"></i>' : ''}
     </button>
   `;
 }
@@ -791,6 +852,7 @@ function appSidebar() {
         <div class="nav-caption">${t('nav.workspace')}</div>
         ${navButton('library', t('nav.library'), 'library')}
         ${navButton('studio', t('nav.studio'), 'studio')}
+        ${navButton('streamer', t('nav.streamer'), 'streamer')}
         ${navButton('settings', t('nav.settings'), 'settings')}
       </nav>
 
@@ -1175,6 +1237,221 @@ function audioSessionRack() {
   `;
 }
 
+function processingToggle(key, label, description, technology = '') {
+  const enabled = Boolean(state.voiceProcessing[key]);
+  return `
+    <div class="processing-toggle-row">
+      <div class="processing-toggle-copy">
+        <strong>${label}</strong>
+        <p>${description}</p>
+        ${technology ? `<span>${technology}</span>` : ''}
+      </div>
+      <button
+        class="toggle-switch ${enabled ? 'is-on' : ''}"
+        data-voice-toggle="${key}"
+        role="switch"
+        aria-checked="${enabled}"
+        aria-label="${escapeHtml(label)}"
+      ><i></i></button>
+    </div>
+  `;
+}
+
+function advancedDbMeter(label, level, className) {
+  const db = levelToDb(level);
+  const minimum = Number(state.voiceProcessing.targetMinDb);
+  const maximum = Number(state.voiceProcessing.targetMaxDb);
+  const bandStart = streamDbMeterPercent(minimum);
+  const bandWidth = Math.max(2, streamDbMeterPercent(maximum) - bandStart);
+  return `
+    <div class="advanced-db-meter">
+      <div class="advanced-db-head">
+        <span>${label}</span>
+        <strong class="${className}-db-value">${formatDb(db)}</strong>
+      </div>
+      <div class="advanced-db-track">
+        <i class="target-db-band" style="left:${bandStart}%;width:${bandWidth}%"></i>
+        <b class="${className}-db-fill" style="width:${streamDbMeterPercent(db)}%"></b>
+        <span class="db-zero-marker"></span>
+      </div>
+      <div class="db-scale"><span>−60</span><span>−36</span><span>−18</span><span>0 dBFS</span></div>
+    </div>
+  `;
+}
+
+function targetRangeControl() {
+  const minimum = Number(state.voiceProcessing.targetMinDb);
+  const maximum = Number(state.voiceProcessing.targetMaxDb);
+  const center = (minimum + maximum) / 2;
+  const tolerance = Math.max(1, (maximum - minimum) / 2);
+  return `
+    <div class="target-range-control">
+      <div class="target-range-summary">
+        <div>
+          <span>${t('streamer.targetCenter')}</span>
+          <strong class="target-center-value">${center.toFixed(1)} dBFS</strong>
+        </div>
+        <div>
+          <span>${t('streamer.tolerance')}</span>
+          <strong class="target-tolerance-value">±${tolerance.toFixed(1)} dB</strong>
+        </div>
+        <div>
+          <span>${t('streamer.activeRange')}</span>
+          <strong class="target-range-value">${minimum.toFixed(1)}…${maximum.toFixed(1)} dBFS</strong>
+        </div>
+      </div>
+      <label class="calibration-range">
+        <span>${t('streamer.targetCenter')}</span>
+        <input class="range" id="target-center-range" type="range" min="-30" max="-6" step="0.5" value="${center}" />
+      </label>
+      <label class="calibration-range">
+        <span>${t('streamer.tolerance')}</span>
+        <input class="range" id="target-tolerance-range" type="range" min="1" max="8" step="0.5" value="${tolerance}" />
+      </label>
+    </div>
+  `;
+}
+
+function filterSettingsPanel() {
+  return `
+    <div class="filter-settings-layout">
+      <section class="surface filter-settings-card">
+        <div class="surface-head">
+          <div><div class="panel-kicker">VOICE DSP</div><h2>${t('filters.voiceCleanup')}</h2></div>
+          <span class="status-pill is-good">48 kHz · 10 ms</span>
+        </div>
+        <p class="section-lead">${t('filters.voiceCleanupDescription')}</p>
+        <div class="processing-toggle-list">
+          ${processingToggle('aecEnabled', t('filters.aec'), t('filters.aecDescription'), 'WebRTC AEC3')}
+          ${processingToggle('rnnoiseEnabled', t('filters.rnnoise'), t('filters.rnnoiseDescription'), 'RNNoise · BSD-3-Clause')}
+          ${processingToggle('noiseGateEnabled', t('filters.gate'), t('filters.gateDescription'), 'Soft gate')}
+        </div>
+      </section>
+      <section class="surface filter-settings-card">
+        <div class="surface-head">
+          <div><div class="panel-kicker">DYNAMICS</div><h2>${t('filters.dynamics')}</h2></div>
+          <span class="status-pill">${t('common.adaptive')}</span>
+        </div>
+        <div class="filter-range-stack">
+          <label class="gain-control">
+            <div class="gain-head"><div><strong>${t('filters.gateThreshold')}</strong><span>${t('filters.gateThresholdHelp')}</span></div><output class="gate-threshold-value">${formatDb(state.voiceProcessing.gateThresholdDb)}</output></div>
+            <input class="range" id="gate-threshold-range" type="range" min="-75" max="-30" step="1" value="${state.voiceProcessing.gateThresholdDb}" />
+          </label>
+          <label class="gain-control">
+            <div class="gain-head"><div><strong>${t('filters.compressor')}</strong><span>${t('filters.compressorHelp')}</span></div><output class="compressor-ratio-value">${Number(state.voiceProcessing.compressorRatio).toFixed(1)}:1</output></div>
+            <input class="range" id="compressor-ratio-range" type="range" min="1" max="8" step="0.5" value="${state.voiceProcessing.compressorRatio}" />
+          </label>
+          <label class="gain-control">
+            <div class="gain-head"><div><strong>${t('filters.limiter')}</strong><span>${t('filters.limiterHelp')}</span></div><output class="limiter-ceiling-value">${formatDb(state.voiceProcessing.limiterCeilingDb)}</output></div>
+            <input class="range" id="limiter-ceiling-range" type="range" min="-6" max="-0.5" step="0.5" value="${state.voiceProcessing.limiterCeilingDb}" />
+          </label>
+        </div>
+      </section>
+      <section class="surface filter-settings-card filter-signal-flow">
+        <div class="surface-head"><div><div class="panel-kicker">SIGNAL FLOW</div><h2>${t('filters.order')}</h2></div></div>
+        <div class="signal-flow">
+          <span>MIC</span><i>→</i><strong>AEC3</strong><i>→</i><strong>RNNoise</strong><i>→</i><strong>Gate</strong><i>→</i><strong>Leveler</strong><i>→</i><strong>Limiter</strong><i>→</i><span>STREAM BUS</span>
+        </div>
+        <p>${t('filters.orderDescription')}</p>
+      </section>
+    </div>
+  `;
+}
+
+function settingsTabs() {
+  return `
+    <div class="settings-tabs" role="tablist" aria-label="${t('settings.sections')}">
+      <button class="${state.settingsSection === 'general' ? 'is-active' : ''}" data-settings-section="general" role="tab" aria-selected="${state.settingsSection === 'general'}">${t('settings.general')}</button>
+      <button class="${state.settingsSection === 'filters' ? 'is-active' : ''}" data-settings-section="filters" role="tab" aria-selected="${state.settingsSection === 'filters'}">${t('settings.filters')}</button>
+    </div>
+  `;
+}
+
+function streamerView() {
+  const live = state.systemAudioEnabled;
+  return `
+    ${viewHeader(
+      t('streamer.kicker'),
+      t('streamer.title'),
+      t('streamer.description'),
+      `<div class="latency-chip">${icon('bolt')} DSP <strong>${latencyLabel()}</strong></div>`
+    )}
+
+    <section class="surface streamer-console ${live ? 'is-live' : ''}">
+      <div class="streamer-console-head">
+        <div class="streamer-live-state">
+          <span class="streamer-status-orb">${icon(live ? 'stop' : 'streamer')}</span>
+          <div>
+            <div class="panel-kicker">${live ? `<span class="live-beacon"></span> ${t('streamer.live')}` : t('streamer.ready')}</div>
+            <h2>${live ? t('streamer.liveTitle') : t('streamer.readyTitle')}</h2>
+            <p>${live ? t('streamer.liveDescription') : t('streamer.readyDescription')}</p>
+          </div>
+        </div>
+        <button class="button ${live ? 'button-stop' : 'button-accent'}" id="streamer-broadcast-toggle">
+          ${live ? `${icon('stop')} ${t('studio.stopBroadcast')}` : `${icon('streamer')} ${t('studio.startBroadcast')}`}
+        </button>
+      </div>
+
+      <div class="streamer-meter-grid">
+        <article class="streamer-channel-card">
+          <div class="streamer-channel-head"><span class="round-icon">${icon('mic')}</span><div><small>VOICE BUS</small><h3>${t('streamer.microphone')}</h3></div><output class="microphone-applied-gain">${formatGain(state.nativeAudio.microphoneAppliedGain)}</output></div>
+          ${advancedDbMeter(t('streamer.beforeFilters'), state.nativeAudio.microphoneInputLevel01, 'microphone-input')}
+          ${advancedDbMeter(t('streamer.toObs'), state.nativeAudio.microphoneOutputLevel01, 'microphone-output')}
+          <div class="voice-confidence"><span>${t('streamer.voiceDetection')}</span><div><i class="voice-probability-fill" style="width:${levelPercent(state.nativeAudio.voiceProbability01)}%"></i></div><strong class="voice-probability-value">${levelPercent(state.nativeAudio.voiceProbability01)}%</strong></div>
+        </article>
+        <article class="streamer-channel-card">
+          <div class="streamer-channel-head"><span class="round-icon">${icon('monitor')}</span><div><small>DESKTOP BUS</small><h3>${t('streamer.systemAudio')}</h3></div><output class="system-applied-gain">${formatGain(state.nativeAudio.systemAppliedGain)}</output></div>
+          ${advancedDbMeter(t('streamer.capturedCopy'), state.nativeAudio.systemInputLevel01, 'system-input')}
+          ${advancedDbMeter(t('streamer.toObs'), state.nativeAudio.systemOutputLevel01, 'system-output')}
+          <div class="stream-route-note">${icon('route')}<span>${t('streamer.systemRouteNote')}</span></div>
+        </article>
+      </div>
+    </section>
+
+    <div class="streamer-control-grid">
+      <section class="surface streamer-target-card">
+        <div class="surface-head">
+          <div><div class="panel-kicker">SMART LEVEL MATCH</div><h2>${t('streamer.levelMatch')}</h2></div>
+          <button class="toggle-switch ${state.voiceProcessing.autoLevelEnabled ? 'is-on' : ''}" data-voice-toggle="autoLevelEnabled" role="switch" aria-checked="${state.voiceProcessing.autoLevelEnabled}" aria-label="${t('streamer.levelMatch')}"><i></i></button>
+        </div>
+        <p class="section-lead">${t('streamer.levelMatchDescription')}</p>
+        ${targetRangeControl()}
+        <div class="leveler-safety-note">${icon('alert')}<span>${t('streamer.silenceSafety')}</span></div>
+      </section>
+
+      <section class="surface streamer-monitor-card">
+        <div class="surface-head">
+          <div><div class="panel-kicker">LIVE CALIBRATION</div><h2>${t('streamer.calibration')}</h2></div>
+          <button class="toggle-switch ${state.voiceProcessing.voiceMonitorEnabled ? 'is-on' : ''}" data-voice-toggle="voiceMonitorEnabled" role="switch" aria-checked="${state.voiceProcessing.voiceMonitorEnabled}" aria-label="${t('streamer.monitoring')}"><i></i></button>
+        </div>
+        <div class="calibration-prompt">${icon('mic')}<div><strong>${t('streamer.saySomething')}</strong><p>${t('streamer.saySomethingHelp')}</p></div></div>
+        ${gainControl('voice-monitor-gain-range', t('streamer.monitorLevel'), t('streamer.headphonesOnly'), state.voiceProcessing.voiceMonitorGain, 2, 0.01, 'voice-monitor-gain-value')}
+        <div class="monitor-warning">${icon('alert')} ${t('streamer.headphoneWarning')}</div>
+      </section>
+
+      <section class="surface streamer-filters-card">
+        <div class="surface-head"><div><div class="panel-kicker">MIC PRE-PROCESSING</div><h2>${t('streamer.filters')}</h2></div><button class="button button-subtle" data-open-filter-settings>${t('streamer.tuneFilters')}</button></div>
+        <div class="processing-toggle-list compact">
+          ${processingToggle('aecEnabled', t('filters.aec'), t('filters.aecShort'), 'AEC3')}
+          ${processingToggle('rnnoiseEnabled', t('filters.rnnoise'), t('filters.rnnoiseShort'), 'RNNoise')}
+          ${processingToggle('noiseGateEnabled', t('filters.gate'), t('filters.gateShort'), 'Soft gate')}
+        </div>
+      </section>
+
+      <section class="surface streamer-gains-card">
+        <div class="surface-head"><div><div class="panel-kicker">STREAM BUS</div><h2>${t('streamer.outputGains')}</h2></div><span class="status-pill ${live ? 'is-good' : ''}">${live ? t('common.online') : t('common.ready')}</span></div>
+        ${gainControl('streamer-microphone-gain-range', t('studio.microphone'), t('streamer.cableOnly'), state.microphoneGain, 3, 0.01, 'streamer-microphone-gain-value')}
+        ${gainControl('streamer-system-gain-range', t('streamer.systemAudio'), t('streamer.cableOnly'), state.systemAudioGain, 2, 0.01, 'streamer-system-gain-value')}
+        ${advancedDbMeter(t('streamer.masterOutput'), state.nativeAudio.mixedLevel01, 'streamer-master')}
+      </section>
+    </div>
+
+    <section class="surface streamer-sources">
+      ${audioSessionRack()}
+    </section>
+  `;
+}
+
 function studioView() {
   const live = state.systemAudioEnabled;
   return `
@@ -1240,6 +1517,10 @@ function studioView() {
             <div class="channel-icon">${icon('mic')}</div>
             ${gainControl('microphone-gain-range', t('studio.microphone'), t('studio.yourVoice'), state.microphoneGain, 3, 0.01, 'microphone-gain-value')}
             ${meterRow('MIC', state.nativeAudio.microphoneLevel01, 'microphone', t('studio.physicalInput'))}
+            <div class="mixer-filter-toggles">
+              ${processingToggle('aecEnabled', t('filters.aec'), t('filters.aecShort'), 'AEC3')}
+              ${processingToggle('rnnoiseEnabled', t('filters.rnnoise'), t('filters.rnnoiseShort'), 'RNNoise')}
+            </div>
           </div>
           <div class="mixer-channel">
             <div class="channel-icon">${icon('library')}</div>
@@ -1287,12 +1568,24 @@ function studioView() {
 
 function settingsView() {
   const microphoneName = state.virtualAudio.microphoneName || state.microphoneNameInput;
+  if (state.settingsSection === 'filters') {
+    return `
+      ${viewHeader(
+        t('settings.kicker'),
+        t('settings.title'),
+        t('settings.description')
+      )}
+      ${settingsTabs()}
+      ${filterSettingsPanel()}
+    `;
+  }
   return `
     ${viewHeader(
       t('settings.kicker'),
       t('settings.title'),
       t('settings.description')
     )}
+    ${settingsTabs()}
 
     <div class="settings-grid">
       <section class="surface settings-card driver-card">
@@ -1442,6 +1735,8 @@ function render() {
   const alert = criticalAlert();
   const view = state.activeView === 'studio'
     ? studioView()
+    : state.activeView === 'streamer'
+      ? streamerView()
     : state.activeView === 'settings'
       ? settingsView()
       : libraryView();
@@ -1492,12 +1787,37 @@ function bindEvents() {
   document.getElementById('repair-microphone-btn')?.addEventListener('click', repairDefaultMicrophone);
   document.getElementById('system-audio-toggle')?.addEventListener('click', toggleSystemAudio);
   document.getElementById('system-audio-cta')?.addEventListener('click', toggleSystemAudio);
+  document.getElementById('streamer-broadcast-toggle')?.addEventListener('click', toggleSystemAudio);
   document.getElementById('autostart-toggle')?.addEventListener('click', toggleAutostart);
   document.getElementById('cursor-glow-toggle')?.addEventListener('click', toggleCursorGlow);
   document.getElementById('physical-microphone')?.addEventListener('change', (event) => onInputDeviceChange(event.target.value));
+  document.querySelectorAll('[data-settings-section]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.settingsSection = button.dataset.settingsSection;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-open-filter-settings]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeView = 'settings';
+      state.settingsSection = 'filters';
+      render();
+    });
+  });
+  document.querySelectorAll('[data-voice-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const key = button.dataset.voiceToggle;
+      updateVoiceProcessing({ [key]: !Boolean(state.voiceProcessing[key]) }, {
+        rerender: true,
+        immediate: true
+      });
+    });
+  });
 
   document.getElementById('microphone-gain-range')?.addEventListener('input', (event) =>
     updateGain('set_microphone_gain', 'microphoneGain', event.target.value, '.microphone-gain-value'));
+  document.getElementById('streamer-microphone-gain-range')?.addEventListener('input', (event) =>
+    updateGain('set_microphone_gain', 'microphoneGain', event.target.value, '.streamer-microphone-gain-value'));
   document.getElementById('volume-range')?.addEventListener('input', (event) => onVolumeChange(event.target.value));
   document.getElementById('overdrive-range')?.addEventListener('input', (event) =>
     updateGain('set_sound_overdrive', 'soundOverdrive', event.target.value, '.overdrive-value', formatMultiplier));
@@ -1505,6 +1825,56 @@ function bindEvents() {
     updateGain('set_monitor_gain', 'monitorGain', event.target.value, '.monitor-gain-value'));
   document.getElementById('system-gain-range')?.addEventListener('input', (event) =>
     updateGain('set_system_audio_gain', 'systemAudioGain', event.target.value, '.system-gain-value'));
+  document.getElementById('streamer-system-gain-range')?.addEventListener('input', (event) =>
+    updateGain('set_system_audio_gain', 'systemAudioGain', event.target.value, '.streamer-system-gain-value'));
+  document.getElementById('voice-monitor-gain-range')?.addEventListener('input', (event) => {
+    const voiceMonitorGain = Number(event.target.value);
+    state.voiceProcessing.voiceMonitorGain = voiceMonitorGain;
+    const output = document.querySelector('.voice-monitor-gain-value');
+    if (output) output.textContent = formatVolume(voiceMonitorGain);
+    updateVoiceProcessing({ voiceMonitorGain });
+  });
+  const updateTargetRange = () => {
+    const center = Number(document.getElementById('target-center-range')?.value);
+    const tolerance = Number(document.getElementById('target-tolerance-range')?.value);
+    if (!Number.isFinite(center) || !Number.isFinite(tolerance)) return;
+    const targetMinDb = Math.max(-36, center - tolerance);
+    const targetMaxDb = Math.min(-3, center + tolerance);
+    state.voiceProcessing.targetMinDb = targetMinDb;
+    state.voiceProcessing.targetMaxDb = targetMaxDb;
+    const centerOutput = document.querySelector('.target-center-value');
+    const toleranceOutput = document.querySelector('.target-tolerance-value');
+    const rangeOutput = document.querySelector('.target-range-value');
+    if (centerOutput) centerOutput.textContent = `${center.toFixed(1)} dBFS`;
+    if (toleranceOutput) toleranceOutput.textContent = `±${tolerance.toFixed(1)} dB`;
+    if (rangeOutput) rangeOutput.textContent = `${targetMinDb.toFixed(1)}…${targetMaxDb.toFixed(1)} dBFS`;
+    document.querySelectorAll('.target-db-band').forEach((band) => {
+      const start = streamDbMeterPercent(targetMinDb);
+      band.style.left = `${start}%`;
+      band.style.width = `${Math.max(2, streamDbMeterPercent(targetMaxDb) - start)}%`;
+    });
+    updateVoiceProcessing({ targetMinDb, targetMaxDb });
+  };
+  document.getElementById('target-center-range')?.addEventListener('input', updateTargetRange);
+  document.getElementById('target-tolerance-range')?.addEventListener('input', updateTargetRange);
+  document.getElementById('gate-threshold-range')?.addEventListener('input', (event) => {
+    const gateThresholdDb = Number(event.target.value);
+    const output = document.querySelector('.gate-threshold-value');
+    if (output) output.textContent = formatDb(gateThresholdDb);
+    updateVoiceProcessing({ gateThresholdDb });
+  });
+  document.getElementById('compressor-ratio-range')?.addEventListener('input', (event) => {
+    const compressorRatio = Number(event.target.value);
+    const output = document.querySelector('.compressor-ratio-value');
+    if (output) output.textContent = `${compressorRatio.toFixed(1)}:1`;
+    updateVoiceProcessing({ compressorRatio });
+  });
+  document.getElementById('limiter-ceiling-range')?.addEventListener('input', (event) => {
+    const limiterCeilingDb = Number(event.target.value);
+    const output = document.querySelector('.limiter-ceiling-value');
+    if (output) output.textContent = formatDb(limiterCeilingDb);
+    updateVoiceProcessing({ limiterCeilingDb });
+  });
   document.querySelectorAll('[data-session-volume]').forEach((range) => {
     range.addEventListener('input', (event) =>
       setAudioSessionVolume(event.currentTarget.dataset.sessionVolume, event.currentTarget.value));
@@ -1576,6 +1946,37 @@ function updateNativeAudioUi() {
       label.textContent = `${levelPercent(value)}%`;
     });
   });
+
+  const dbMeters = [
+    ['microphone-input', state.nativeAudio.microphoneInputLevel01],
+    ['microphone-output', state.nativeAudio.microphoneOutputLevel01],
+    ['system-input', state.nativeAudio.systemInputLevel01],
+    ['system-output', state.nativeAudio.systemOutputLevel01],
+    ['streamer-master', state.nativeAudio.mixedLevel01]
+  ];
+  dbMeters.forEach(([name, value]) => {
+    const db = levelToDb(value);
+    document.querySelectorAll(`.${name}-db-fill`).forEach((fill) => {
+      fill.style.width = `${streamDbMeterPercent(db)}%`;
+    });
+    document.querySelectorAll(`.${name}-db-value`).forEach((label) => {
+      label.textContent = formatDb(db);
+    });
+  });
+
+  const voiceProbability = levelPercent(state.nativeAudio.voiceProbability01);
+  document.querySelectorAll('.voice-probability-fill').forEach((fill) => {
+    fill.style.width = `${voiceProbability}%`;
+  });
+  document.querySelectorAll('.voice-probability-value').forEach((label) => {
+    label.textContent = `${voiceProbability}%`;
+  });
+  document.querySelectorAll('.microphone-applied-gain').forEach((label) => {
+    label.textContent = formatGain(state.nativeAudio.microphoneAppliedGain);
+  });
+  document.querySelectorAll('.system-applied-gain').forEach((label) => {
+    label.textContent = formatGain(state.nativeAudio.systemAppliedGain);
+  });
 }
 
 function audioSessionSignature(sessions) {
@@ -1585,7 +1986,7 @@ function audioSessionSignature(sessions) {
 }
 
 function updateAudioSessionsUi() {
-  if (state.activeView !== 'studio' || !state.systemAudioEnabled) return;
+  if (!['studio', 'streamer'].includes(state.activeView) || !state.systemAudioEnabled) return;
   const rows = new Map(
     [...document.querySelectorAll('[data-session-row]')]
       .map((row) => [row.dataset.sessionRow, row])
@@ -1618,7 +2019,7 @@ async function pollAudioSessions() {
     const sessions = await invoke('list_audio_sessions');
     const changed = audioSessionSignature(state.audioSessions) !== audioSessionSignature(sessions);
     state.audioSessions = sessions;
-    if (changed && state.activeView === 'studio' && state.systemAudioEnabled) {
+    if (changed && ['studio', 'streamer'].includes(state.activeView) && state.systemAudioEnabled) {
       render();
     } else {
       updateAudioSessionsUi();
