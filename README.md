@@ -5,9 +5,9 @@
 <h1 align="center">MicDeck</h1>
 
 <p align="center">
-  <strong>A focused Windows audio desk for voice chat.</strong>
+  <strong>A native Windows soundboard, voice processor, and system-audio router.</strong>
   <br>
-  Trigger sound clips, share what your PC is playing, and send the complete mix through one virtual microphone.
+  Trigger clips, share desktop audio, process your microphone, and send the complete mix through one managed virtual microphone.
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
   ·
   <a href="#signal-path">Signal path</a>
   ·
-  <a href="#current-scope">Current scope</a>
+  <a href="#micdeck-vad-custom-driver">MicDeck VAD</a>
   ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
@@ -26,60 +26,53 @@
   <a href="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/3godzinyL/MicDeck/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/3godzinyL/MicDeck?display_name=tag&style=flat-square&color=c8ff63&labelColor=0c0e11"></a>
   <img alt="Windows 10 and 11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0c0e11?style=flat-square&logo=windows&logoColor=c8ff63">
-  <img alt="Rust and C++20" src="https://img.shields.io/badge/core-Rust%20%2B%20C%2B%2B20-0c0e11?style=flat-square&logo=rust&logoColor=c8ff63">
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-0c0e11?style=flat-square&logoColor=c8ff63"></a>
+  <img alt="Rust, C++, C and CMake" src="https://img.shields.io/badge/native-Rust%20%C2%B7%20C%2B%2B20%20%C2%B7%20C%20%C2%B7%20CMake-0c0e11?style=flat-square&logo=rust&logoColor=c8ff63">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-0c0e11?style=flat-square"></a>
 </p>
 
 ---
 
-MicDeck combines a soundboard, Windows output capture, and virtual-microphone routing in one application. The interface stays deliberately small; a separate native C++/WASAPI process owns the real-time audio path.
+MicDeck replaces the usual stack of a soundboard, loopback recorder, voice processor, and virtual mixer with one focused application. Rust/Tauri owns the interface and lifecycle, while a separate native C++/WASAPI process owns the real-time audio path.
 
-No account. No telemetry. No cloud mixer. No code injection or process hooks.
+MicDeck now supports two virtual-audio backends:
+
+- **MicDeck VAD** — the project's own WaveRT/PortCls virtual-audio driver;
+- **VB-CABLE** — the compatibility backend based on the official VB-Audio package.
+
+The backend can be selected in Settings. The native mixer does not contain backend-specific DSP: it renders the same final 48 kHz mix to whichever virtual endpoint is active.
+
+No account. No telemetry. No cloud mixer. No DLL injection or process hooks.
 
 ## At a glance
 
-| | Current public preview |
+| Area | Implementation |
 | --- | --- |
 | Platform | Windows 10/11 x64 |
-| Inputs | Physical microphone, sound pads, default Windows output |
-| Output | One managed virtual microphone through the official VB-CABLE driver |
-| Audio core | C++20, event-driven WASAPI shared mode, MMCSS scheduling |
+| Inputs | Physical microphone, sound pads, aggregate desktop audio, private process loopbacks |
+| Output | One managed virtual microphone |
+| Virtual backends | MicDeck VAD or VB-CABLE |
+| Audio core | C++20, event-driven WASAPI shared mode, MMCSS |
+| Voice processing | WebRTC AEC3, RNNoise, smart gate, adaptive leveling/compression, limiter |
 | Control layer | Rust + Tauri 2 |
+| Driver core | C/C++, PortCls/WaveRT, bounded nonpaged audio pipeline |
 | Internal stream | 48 kHz, stereo, 32-bit float |
-| Live-audio network use | None |
 | Interface | English and Polish |
+| Network use for live audio | None |
 
-### Features
+## Features
 
-- **Streamer console** — match microphone and desktop audio to one configurable dBFS range before the combined signal reaches OBS.
-- **Private application levels** — attenuate or mute a browser, Spotify, or a game only in MicDeck's virtual-cable mix without changing the Windows listening volume.
-- **Production voice chain** — WebRTC AEC3, RNNoise, a smart gate, adaptive leveling/compression, and a final limiter run in the native audio process.
-- **Sound pads** — import and play MP3, WAV, FLAC, OGG, AAC, and M4A files.
-- **Per-sound global hotkeys** — record combinations such as `Alt+P` and trigger clips while MicDeck is hidden in the tray.
-- **Quick Capture** — add audio from supported YouTube, YouTube Shorts, and TikTok URLs.
-- **Responsive imports** — downloads, decoding, and metadata analysis run outside the UI thread.
-- **Live Studio** — control microphone, pad, system-audio, and monitoring levels from one view.
-- **Live calibration** — compare pre/post-filter meters, voice probability, adaptive gain, and the final OBS output while monitoring through headphones.
-- **Visible diagnostics** — inspect negotiated latency, signal levels, engine state, process ID, and underruns.
+- **Soundboard** — import and play MP3, WAV, FLAC, OGG, AAC, and M4A files.
+- **Per-sound global hotkeys** — trigger clips while MicDeck is hidden in the tray.
+- **System-audio sharing** — route YouTube, Spotify, games, or the full Windows render mix into voice chat.
+- **Private application levels** — attenuate or mute selected applications only in MicDeck's outgoing mix.
+- **Production voice chain** — AEC3, RNNoise, gate, adaptive level matching, compression, and limiting.
+- **Streamer console** — compare microphone and desktop audio before and after processing against one target dBFS range.
+- **Quick Capture** — import audio from supported YouTube, YouTube Shorts, and TikTok URLs.
+- **Live diagnostics** — inspect signal levels, negotiated latency, engine state, process ID, underruns, and capture loss.
+- **Dual virtual-audio backend** — switch between MicDeck VAD and VB-CABLE without changing the mixer or DSP graph.
+- **Automatic route recovery** — reopen the selected WASAPI route after endpoint invalidation or a Windows Audio restart.
 - **Windows integration** — optional launch at sign-in, close-to-tray behavior, and persistent background routing.
-- **Local-first operation** — live audio never leaves the machine through a MicDeck service.
-
-### Streamer and voice processing
-
-The dedicated **Streamer** workspace turns MicDeck into a controlled broadcast
-front end rather than a simple system-audio switch:
-
-- choose a target dBFS center and tolerance for both voice and desktop audio;
-- compare microphone and desktop levels before and after processing in real time;
-- calibrate normal speech with an adjustable local headphone monitor;
-- run AEC3 and RNNoise before gating, adaptive leveling/compression, and limiting;
-- attenuate individual applications only in the OBS/virtual-cable copy without
-  changing their Windows listening volume;
-- retain the complete aggregate desktop mix as a safe fallback if a private
-  process capture cannot be started.
-
-> [!IMPORTANT]
-> MicDeck is an early public preview. The builds are not code-signed yet, so Windows SmartScreen may display an unknown-publisher warning. Download releases only from this repository and verify the supplied `SHA256SUMS.txt`.
+- **Local-first operation** — microphone and desktop audio stay on the computer.
 
 ## Interface
 
@@ -94,7 +87,7 @@ front end rather than a simple system-audio switch:
   </tr>
   <tr>
     <td align="center"><strong>Library</strong><br><sub>Sound pads, global hotkeys, search, playback, and background imports.</sub></td>
-    <td align="center"><strong>Live Studio</strong><br><sub>Microphone, system audio, meters, monitoring, and routing state.</sub></td>
+    <td align="center"><strong>Live Studio</strong><br><sub>Microphone, desktop audio, meters, monitoring, and route state.</sub></td>
   </tr>
   <tr>
     <td colspan="2">
@@ -106,11 +99,11 @@ front end rather than a simple system-audio switch:
   </tr>
   <tr>
     <td colspan="2">
-      <img src="docs/micdeck-filters-en.png" alt="MicDeck Audio filters settings with AEC3, RNNoise, smart gate, compressor, limiter, and processing-order diagram">
+      <img src="docs/micdeck-filters-en.png" alt="MicDeck audio filters with AEC3, RNNoise, smart gate, compressor, limiter, and processing-order diagram">
     </td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><strong>Audio filter settings</strong><br><sub>Persistent voice cleanup, dynamics, safety ceiling, and an explicit real-time processing order.</sub></td>
+    <td colspan="2" align="center"><strong>Audio processing</strong><br><sub>Persistent cleanup, dynamics, safety ceiling, and an explicit real-time processing order.</sub></td>
   </tr>
 </table>
 
@@ -121,32 +114,35 @@ Download the latest files from [GitHub Releases](https://github.com/3godzinyL/Mi
 | File | Use case |
 | --- | --- |
 | `MicDeck-Setup.exe` | Recommended per-user Windows installer. |
-| `MicDeck-portable.exe` | Portable application build. The audio driver may still require installation. |
-| `SHA256SUMS.txt` | SHA-256 checksums for both executables. |
+| `MicDeck-portable.exe` | Portable application build. A kernel audio driver still requires installation. |
+| `SHA256SUMS.txt` | SHA-256 checksums for release files. |
 
-Verify a downloaded file in PowerShell:
+Verify a downloaded file:
 
 ```powershell
 Get-FileHash .\MicDeck-Setup.exe -Algorithm SHA256
 ```
 
-Compare the result with the matching line in `SHA256SUMS.txt`.
-
 ### First run
 
 1. Start MicDeck.
-2. Open **Settings** and install the official VB-CABLE driver if no compatible virtual endpoint is available.
-3. Select your real physical microphone.
-4. In Discord, a game, OBS, or another voice application, select **MicDeck Virtual Mic** as the input.
-5. Add a sound or open **Live Studio** and enable system-audio sharing.
-6. Optionally assign global hotkeys and enable **Launch at sign-in**.
+2. Open **Settings → Virtual audio backend**.
+3. Select **MicDeck VAD** or the **VB-CABLE compatibility backend**.
+4. Install the selected driver when Windows displays the UAC prompt.
+5. Select your real physical microphone.
+6. In Discord, OBS, a game, or another voice application, select the matching virtual microphone:
+   - `MicDeck Virtual Microphone` for MicDeck VAD;
+   - the managed VB-CABLE capture endpoint for VB-CABLE.
+7. Add a sound or enable desktop-audio sharing in Live Studio.
 
-Closing the main window keeps MicDeck in the Windows notification area and does not stop the audio route. Use **Quit / Zakończ** from the tray menu to exit normally.
+Closing the main window keeps MicDeck in the Windows notification area and does not stop the route. Use **Quit / Zakończ** from the tray menu to exit normally.
 
 > [!TIP]
-> Discord's Noise Suppression, Echo Cancellation, and Automatic Gain Control are designed for speech. If they cut music or effects, reduce or disable them for the MicDeck input.
+> Voice-chat noise suppression, echo cancellation, and automatic gain control are designed for speech. If they cut music or effects, reduce or disable them for the MicDeck virtual microphone.
 
 ## Signal path
+
+The application-side signal graph is identical for both virtual backends. Only the final render target changes.
 
 ```mermaid
 flowchart LR
@@ -154,52 +150,125 @@ flowchart LR
   desktop["Default Windows output"] --> loopback["Aggregate loopback / AEC reference"]
   apps["Rendering applications"] --> process["Private process loopbacks"]
   pads["Sound pads"] --> ipc["Versioned shared-memory IPC"]
-  loopback --> dsp["AEC3 → RNNoise → gate → leveler"]
-  capture --> dsp
-  dsp --> mixer["Native C++ mixer + limiter"]
+
+  capture --> voice["AEC3 → RNNoise → gate → leveler"]
+  loopback --> voice
   loopback --> desktopbus["Adaptive desktop leveler"]
   process --> desktopbus
+
+  voice --> mixer["Native C++ mixer"]
   desktopbus --> mixer
   ipc --> mixer
-  mixer --> cable["VB-CABLE virtual endpoint"]
-  cable --> chat["Discord · games · OBS · calls"]
+  mixer --> limiter["Final limiter"]
+
+  limiter --> backend{"Selected virtual-audio backend"}
+
+  backend --> mdinput["MicDeck Driver Input"]
+  mdinput --> mdvad["MicDeckVad.sys"]
+  mdvad --> mdmic["MicDeck Virtual Microphone"]
+
+  backend --> vbinput["VB-CABLE render endpoint"]
+  vbinput --> vbcable["VB-CABLE driver"]
+  vbcable --> vbmic["Managed VB-CABLE capture endpoint"]
+
+  mdmic --> clients["Discord · OBS · games · calls"]
+  vbmic --> clients
 ```
 
-### Real-time audio core
+The C++ engine remains backend-agnostic. Rust resolves the selected render/capture endpoint IDs, sends one atomic configuration snapshot through the native bridge, and restarts the route only after the previous endpoint has been released.
 
-The native engine is intentionally separated from the webview and application state:
+## MicDeck VAD custom driver
+
+MicDeck VAD is the project's own virtual-audio cable for Windows. It is implemented as a separate kernel driver package rather than code injected into the application.
+
+### Driver endpoint graph
+
+```mermaid
+flowchart LR
+  engine["soundboard_audio_engine.exe"] -->|WASAPI render| render["MicDeck Driver Input"]
+  render --> waveout["WaveRT render miniport"]
+  waveout --> decode["PCM/float boundary conversion"]
+  decode --> pipeline["MdCablePipeline\n48 kHz stereo float"]
+  pipeline --> encode["Capture format conversion"]
+  encode --> wavein["WaveRT capture miniport"]
+  wavein --> mic["MicDeck Virtual Microphone"]
+  mic --> client["Discord · OBS · browser · game"]
+```
+
+### What happens inside the driver
+
+1. **Normal Windows endpoints**  
+   Windows sees a render endpoint named `MicDeck Driver Input` and a capture endpoint named `MicDeck Virtual Microphone`.
+
+2. **Standard WASAPI connection**  
+   The existing native engine renders to the driver through ordinary event-driven WASAPI. No custom audio IOCTL transport is required.
+
+3. **WaveRT / PortCls miniports**  
+   Separate render and capture miniports expose the two sides of the virtual cable and share one internal transport object.
+
+4. **Canonical internal format**  
+   The transport uses 48 kHz, stereo, 32-bit float. PCM16, PCM24, PCM32, mono, and stereo formats are converted at the endpoint boundary.
+
+5. **Bounded nonpaged pipeline**  
+   Audio travels through a preallocated single-producer/single-consumer ring stored in nonpaged kernel memory. The real-time path performs no file access, UI work, or unbounded allocation.
+
+6. **Voice-oriented latency control**  
+   The pipeline supports Ultra Low, Balanced, and Resilient queue policies. It primes the capture side before playback, trims stale audio after scheduling spikes, and returns to current speech instead of replaying a long delayed queue.
+
+7. **Click-safe failure behavior**  
+   Underflow produces initialized silence. Producer loss and discontinuities fade toward zero, and a restarted route begins with a clean queue rather than old audio.
+
+8. **Diagnostics**  
+   Versioned driver statistics expose active streams, queue depth, watermarks, written/read/dropped/discarded frames, silent frames, discontinuities, latency mode, and reset generation.
+
+9. **Controlled installation**  
+   The package consists of:
+   - `MicDeckVad.sys`
+   - `MicDeckVad.inf`
+   - `MicDeckVad.cat`
+
+   MicDeck verifies the packaged files and uses a fixed-operation elevated helper for status, install, repair, and uninstall. The helper is not a general command runner.
+
+10. **Runtime recovery**  
+    If Windows Audio restarts or an endpoint becomes invalid, the native engine releases the dead WASAPI clients, re-enumerates the selected backend, and retries the same route with bounded backoff.
+
+### Driver package identity
+
+```text
+Hardware ID: ROOT\MICDECKVAD
+Render endpoint: MicDeck Driver Input
+Capture endpoint: MicDeck Virtual Microphone
+Canonical stream: 48,000 Hz · stereo · float32
+Driver model: WDM PortCls / WaveRT
+```
+
+## Real-time audio core
 
 - `IAudioClient3` negotiates a low shared-mode engine period supported by each endpoint.
-- Classic WASAPI initialization provides a safe fallback when `IAudioClient3` is unavailable.
-- Capture and render use `AUDCLNT_STREAMFLAGS_EVENTCALLBACK`, not timer-based polling.
-- Audio threads join Windows MMCSS with elevated `Audio` / `Pro Audio` scheduling.
-- Fixed-capacity SPSC ring buffers use acquire/release atomics between producers and consumers.
-- The mixing hot path uses fixed buffers and performs no UI work.
-- The Studio view reports the measured configuration estimate and underruns instead of promising one universal latency value.
+- Classic WASAPI initialization provides a fallback when `IAudioClient3` is unavailable.
+- Capture and render use `AUDCLNT_STREAMFLAGS_EVENTCALLBACK`, not UI or JavaScript timers.
+- Audio threads join Windows MMCSS with `Audio` / `Pro Audio` scheduling.
+- Fixed-capacity SPSC rings use acquire/release atomics between producers and consumers.
+- The mixing hot path uses fixed buffers and performs no webview work.
+- Filter changes crossfade instead of replacing a processing graph in one sample.
+- Per-process loopback levels affect only MicDeck's outgoing mix, never the user's Windows listening volume.
 
-Actual end-to-end latency depends on the physical device, its driver, the virtual endpoint, and the voice application. MicDeck does not advertise a fabricated fixed millisecond figure.
+Actual end-to-end latency depends on the physical device, Windows audio engine, selected virtual backend, and client application. MicDeck reports negotiated and measured values rather than one fabricated universal number.
 
-### Application and worker layer
+## Application and worker layer
 
-Rust/Tauri owns window and tray lifecycle, settings, the sound library, virtual-device setup, and communication with the native engine. Downloads, file decoding, and waveform analysis are dispatched to background blocking workers. The interface receives progress events and refreshes only after prepared metadata is ready.
+Rust/Tauri owns:
 
-The native engine and IPC bridge are compiled during the Rust build and embedded into the main executable. At runtime they are restored into a content-addressed directory under `%LOCALAPPDATA%\micdeck\native\<hash>`; existing files are compared with the embedded bytes before reuse.
+- window and tray lifecycle;
+- settings and backend persistence;
+- sound library and metadata;
+- hotkeys;
+- driver package management;
+- endpoint discovery;
+- native-engine supervision;
+- background imports and downloads.
 
-## Current scope
-
-This section is deliberately explicit. These are preview boundaries, not hidden claims.
-
-| Area | What v0.1 currently does |
-| --- | --- |
-| System capture | Keeps aggregate Windows loopback warm for AEC and fallback. When an application level differs from 100%, MicDeck builds a private process-loopback bus and applies the level only to the virtual-cable copy. Windows listening levels are never mutated. |
-| WASAPI mode | Uses adaptive shared mode. Exclusive-mode access is not claimed. |
-| Monitoring | Local sound-pad monitoring is muted while system-audio broadcast is active to prevent a feedback loop. The outgoing virtual mix still contains the pads. |
-| Device changes | Engine state and errors are visible in Studio and Settings. A manual **Restart audio engine** action is available when a device or driver is reconfigured. |
-| Default microphone | MicDeck no longer overwrites the Windows default input automatically. Settings includes an explicit repair action that restores the selected physical microphone for Console, Multimedia, and Communications roles. |
-| DSP | The microphone path runs AEC3, RNNoise, an optional smart gate, adaptive range matching/compression, and a final limiter at 48 kHz. Filter state is persistent and toggles crossfade over 150 ms. VST hosting is not included. |
-| Process-loopback compatibility | Per-application stream levels require Windows 10 build 20348 or newer. On unsupported systems or capture failure, MicDeck retains the aggregate system mix instead of dropping a source. |
-| Distribution | Binaries and checksums are published, but Authenticode signing and automatic updates remain roadmap items. |
-| Architecture | Windows x64 only. No macOS, Linux, ARM64, mobile remote, Stream Deck, or MIDI support is claimed in this release. |
+The native bridge and audio engine are compiled during the Rust build and embedded into the application. At runtime they are restored into a content-addressed directory below `%LOCALAPPDATA%\micdeck\native\<hash>` and verified before reuse.
 
 ## Quick Capture
 
@@ -210,70 +279,77 @@ Supported sources:
 - `youtu.be/...`
 - `tiktok.com/...`
 
-URL import requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and [`FFmpeg`](https://ffmpeg.org/) in `PATH`. Run `scripts\install-tools.bat` to install both into the local tools directory.
+URL import requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org/) in `PATH`. Run `scripts\install-tools.bat` to install both into the local tools directory.
 
-MicDeck starts these tools as child processes with argument lists; it does not build a shell command from the pasted URL. Imports connect directly to the requested platform and are not proxied through a MicDeck service.
-
-Only download and broadcast media you are allowed to use. MicDeck does not bypass platform permissions, DRM, or copyright restrictions and does not grant rights to third-party content.
+Only download and broadcast media you are allowed to use. MicDeck does not bypass platform permissions, DRM, or copyright restrictions.
 
 ## Privacy and security
 
-- Live microphone, sound-pad, and system audio is processed locally.
+- Live microphone, sound-pad, and desktop audio is processed locally.
 - MicDeck has no account system, analytics SDK, telemetry endpoint, or cloud audio service.
-- It does not inject DLLs, hook another application's process, or capture per-process memory.
-- The Tauri webview receives a narrow capability allow-list for core window operations, autostart, file selection, and global shortcuts.
-- Native audio IPC uses a versioned mapping in the Windows local-session namespace and is not exposed as a network service.
-- The official VB-CABLE archive is verified against the SHA-256 recorded in the source before extraction.
-- Temporary driver files are removed after the installer exits.
+- It does not inject DLLs, hook another application's process, or inspect process memory.
+- The webview receives a narrow Tauri capability allow-list.
+- Native audio IPC uses a versioned mapping in the Windows local-session namespace.
+- Driver packages and embedded native components are checked before privileged operations.
+- The elevated driver helper accepts fixed operations instead of arbitrary commands.
+- Certificates, private keys, generated SYS/CAT files, and local WDK output are excluded from source control.
 
-The current executables are unsigned. Code signing is the largest remaining distribution-hardening item, not something the project attempts to hide.
+Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
 
-Please report vulnerabilities privately according to [SECURITY.md](SECURITY.md). Do not open a public issue for a suspected vulnerability.
+## Virtual-audio backends and third-party software
 
-## VB-CABLE and third-party software
+### MicDeck VAD
 
-MicDeck bundles the official, unmodified **VB-CABLE Driver Pack 45**. VB-CABLE remains a separate VB-Audio product distributed under its donationware model.
+MicDeck VAD is developed as part of MicDeck. Its application integration, driver source, portable audio-core tests, packaging tools, and Windows certification scripts belong to the repository.
 
-VB-Audio's published terms explicitly allow the standard VB-CABLE package to be distributed with another application when the vendor, origin, and donationware model remain visible. MicDeck provides that attribution in the interface and in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Professional and volume deployments may require paid licensing under the vendor's current terms.
+### VB-CABLE
+
+MicDeck retains the official, unmodified **VB-CABLE Driver Pack 45** as a compatibility backend. VB-CABLE remains a separate VB-Audio product distributed under its own donationware and commercial licensing terms.
 
 - [VB-CABLE product page](https://vb-audio.com/Cable/)
-- [VB-Audio distribution and licensing terms](https://vb-audio.com/Services/licensing.htm)
+- [VB-Audio licensing terms](https://vb-audio.com/Services/licensing.htm)
 - [Complete third-party notices](THIRD_PARTY_NOTICES.md)
 
-`yt-dlp` and FFmpeg are optional external tools. They are installed separately, are not linked into MicDeck, and retain their own licenses.
+`yt-dlp` and FFmpeg are optional external tools and retain their own licenses.
 
 ## Build from source
 
-### Requirements
+### Application requirements
 
-- Windows 10 or 11 x64
+- Windows 10/11 x64
 - Node.js 24+
 - Rust stable with the MSVC toolchain
-- Visual Studio 2022 Build Tools with **Desktop development with C++**
+- Visual Studio 2022 with **Desktop development with C++**
 - Microsoft Edge WebView2 Runtime
-- Optional: `yt-dlp` and FFmpeg for URL import
+- Optional: `yt-dlp` and FFmpeg
 
-### Development
+### Application development
 
 ```powershell
 npm ci
 npm run tauri dev
 ```
 
-### Production
+### Application production builds
 
 ```powershell
 npm run build:portable
 npm run build:installer
-```
-
-Or build both:
-
-```powershell
 npm run build:all
 ```
 
-Artifacts are written to `release\`.
+Normal Tauri builds compile and embed the native C++ engine, shared-memory bridge, Rust DSP library, and fixed-operation driver helper.
+
+### MicDeck VAD development
+
+Building the kernel driver additionally requires:
+
+- Windows Driver Kit matching the installed Windows SDK;
+- CMake;
+- a disposable Windows driver-test machine or VM;
+- a test or production driver-signing workflow.
+
+The driver project, portable core tests, package scripts, and end-to-end audio certifier are kept under the MicDeck VAD source tree. The generated signed `SYS/INF/CAT` package is staged into the application resources before a driver-enabled release build.
 
 ### Validation
 
@@ -285,38 +361,39 @@ cargo test --manifest-path src-tauri\Cargo.toml --locked
 cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --locked -- -D warnings
 ```
 
-The same checks run on `windows-latest` through [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The native audio core also includes a hardware-independent self-test under `native-audio\selftest`.
+Driver validation additionally covers the portable ring/pipeline tests, WDK build, INF verification, catalog generation, package signing, endpoint installation, render-to-capture audio verification, and Driver Verifier runs on a test system.
 
 ## Project layout
 
 ```text
-src/                    Tauri web UI, localization, and interaction layer
-src-tauri/              Rust application state, workers, persistence, and lifecycle
-native-audio/engine/    C++20 WASAPI capture, loopback, mixing, monitoring, and render
-native-audio/bridge/    Versioned shared-memory IPC bridge
-native-audio/selftest/  Hardware-independent native audio tests
-scripts/                Build, dependency, and diagnostic helpers
-docs/                   Screenshots, release notes, and launch artwork
-.github/                 CI, issue forms, and contribution templates
+src/                         Tauri web UI, localization, and interaction layer
+src-tauri/                   Rust state, persistence, workers, lifecycle, and driver integration
+native-audio/engine/         C++20 WASAPI capture, loopback, DSP, mixing, monitoring, and render
+native-audio/bridge/         Versioned shared-memory IPC bridge
+native-audio/selftest/       Hardware-independent native audio tests
+drivers/micdeck-vad/         Custom WaveRT/PortCls driver, package, tests, tools, and documentation
+scripts/                     Build, staging, release, dependency, and diagnostic helpers
+docs/                        Screenshots, architecture notes, and release material
+.github/                     CI, source-policy checks, issue forms, and templates
 ```
 
 ## Roadmap
 
-- [ ] Per-application audio capture
-- [ ] Automatic recovery when a physical audio device is unplugged and reconnected
-- [ ] Normalization, threshold limiter, and lightweight EQ
+- [x] Soundboard, desktop loopback, native mixer, and voice processing
+- [x] Private per-process output levels
+- [x] Selectable VB-CABLE / MicDeck VAD backend architecture
+- [x] Custom render-to-capture WaveRT driver source and application integration
+- [ ] Production driver signing and complete Windows certification matrix
 - [ ] Multiple decks and profiles
 - [ ] Stream Deck and MIDI control
-- [ ] Authenticode-signed builds and automatic updates
+- [ ] Authenticode-signed application builds and automatic updates
 - [ ] Additional community translations
-
-The roadmap is intentionally focused. A full DAW, VST host, mobile application, and custom kernel audio driver are not prerequisites for a useful, stable MicDeck release.
 
 ## Contributing
 
-Bug reports, reproducible audio-device edge cases, accessibility improvements, documentation fixes, and focused pull requests are welcome.
+Bug reports, reproducible audio-device edge cases, accessibility improvements, documentation fixes, driver validation results, and focused pull requests are welcome.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Use the provided issue forms and include MicDeck's engine status, Windows version, device names, negotiated latency, and underrun count when reporting audio problems.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Include the Windows version, physical device names, selected virtual backend, engine state, negotiated latency, and underrun/discontinuity counts when reporting audio problems.
 
 ## License
 
