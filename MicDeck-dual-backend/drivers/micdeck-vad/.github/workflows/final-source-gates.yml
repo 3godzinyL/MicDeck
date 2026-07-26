@@ -1,0 +1,46 @@
+name: final-source-gates
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  portable-and-policy:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure portable tests
+        run: cmake -S tests -B out/tests -A x64
+
+      - name: Build portable tests
+        run: cmake --build out/tests --config Release --parallel
+
+      - name: Run portable tests
+        run: ctest --test-dir out/tests -C Release --output-on-failure
+
+      - name: Configure E2E certifier source
+        run: cmake -S tools/e2e-certifier -B out/e2e -A x64
+
+      - name: Build E2E certifier
+        run: cmake --build out/e2e --config Release --parallel
+
+      - name: Validate source package policy
+        shell: pwsh
+        run: |
+          $Forbidden = Get-ChildItem -File -Recurse |
+            Where-Object {
+              $_.Extension -in @(".sys", ".cat", ".pfx", ".pvk") -and
+              $_.FullName -notmatch "\\out\\"
+            }
+          if ($Forbidden) {
+            $Forbidden | Format-Table FullName
+            throw "Built drivers or signing secrets must not be committed."
+          }
+
+          $PrivateKeys = Get-ChildItem -File -Recurse |
+            Select-String -Pattern "BEGIN (RSA |EC )?PRIVATE KEY"
+          if ($PrivateKeys) {
+            throw "Private key material was detected."
+          }

@@ -1,0 +1,22 @@
+name: portable-core
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S tests -B out/tests -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build out/tests --config Release --parallel
+      - run: ctest --test-dir out/tests -C Release --output-on-failure
+  source-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          set -euo pipefail
+          ! find . -type f \( -name '*.sys' -o -name '*.pfx' -o -name '*.pvk' \) | grep .
+          ! grep -RInE 'BEGIN (RSA |EC )?PRIVATE KEY' . --exclude-dir=.git

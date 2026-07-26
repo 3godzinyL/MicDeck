@@ -1,0 +1,33 @@
+{
+  "package": "MicDeckVad v0.3 final verification gates",
+  "portable_configure_ok": true,
+  "portable_build_ok": true,
+  "portable_tests_ok": true,
+  "portable_test_output": "100% tests passed, 0 tests failed out of 2\ncore_tests: passed\npipeline_tests: passed\nRuntime assertions explicitly enabled in Release builds.",
+  "three_final_updates": [
+    {
+      "name": "Pinned official Microsoft audio-driver baseline",
+      "included": true,
+      "executed_here": false
+    },
+    {
+      "name": "Full WDK, INF, CAT, signing and installation gate",
+      "included": true,
+      "executed_here": false
+    },
+    {
+      "name": "Automatic WASAPI render-to-capture audio certifier",
+      "included": true,
+      "executed_here": false
+    }
+  ],
+  "windows_wdk_build_performed_here": false,
+  "windows_e2e_performed_here": false,
+  "production_ready": false,
+  "environment_limitation": "The current environment is Linux and has neither the Windows Driver Kit nor the Windows audio stack.",
+  "code_files": 63,
+  "code_lines": 5759,
+  "all_text_files": 91,
+  "all_text_lines": 6876,
+  "placeholder_hits": []
+}

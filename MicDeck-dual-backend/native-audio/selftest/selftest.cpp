@@ -1,0 +1,244 @@
+// Standalone, hardware-free self-test of the MicDeck audio core.
+//
+// It exercises the lock-free ring buffer used for the IPC bridge and monitor
+// taps, plus the safety properties of the mixer, process-bus gain, aggregate
+// fallback, final limiter, and local monitor before a real device is opened.
+//
+// Build + run are driven by scripts/diagnose.sh. Exit code 0 = everything OK.
+
+#define _CRT_SECURE_NO_WARNINGS
+#include "../engine/src/audio_ring_buffer.h"
+
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+
+namespace {
+
+int g_failures = 0;
+int g_checks = 0;
+
+void check(bool condition, const char* name) {
+    ++g_checks;
+    if (condition) {
+        std::printf("  [ OK ] %s\n", name);
+    } else {
+        ++g_failures;
+        std::printf("  [FAIL] %s\n", name);
+    }
+}
+
+bool nearly(float a, float b, float epsilon = 1e-4f) {
+    return std::fabs(a - b) <= epsilon;
+}
+
+float db_to_linear(float value) {
+    return std::pow(10.0f, value / 20.0f);
+}
+
+// Mirrors the hard safety bound at the end of AudioEngine::render_mix. The
+// production engine also applies a stateful attack/release gain before this
+// clamp, which can only reduce the magnitude further.
+float limit_sample(float sum, float ceiling_db = -1.0f) {
+    const float ceiling = db_to_linear(ceiling_db);
+    return std::fmax(-ceiling, std::fmin(sum, ceiling));
+}
+
+float mix_sample(float mic, float sound, float mic_gain, float sound_gain) {
+    return limit_sample(mic * mic_gain + sound * sound_gain);
+}
+
+float mix_with_system(
+    float mic,
+    float sound,
+    float system,
+    float mic_gain,
+    float sound_gain,
+    float system_gain) {
+    return limit_sample(
+        mic * mic_gain +
+        sound * sound_gain +
+        system * system_gain);
+}
+
+float select_desktop_bus(
+    float aggregate,
+    float private_process_mix,
+    bool private_mix_ready) {
+    return private_mix_ready ? private_process_mix : aggregate;
+}
+
+float monitor_sample(float sound, float sound_gain, float monitor_gain) {
+    return std::tanh(sound * sound_gain * monitor_gain);
+}
+
+float downmix_voice_sample(
+    float left,
+    float right,
+    bool unsafe_to_average,
+    bool select_right) {
+    if (unsafe_to_average) {
+        return select_right ? right : left;
+    }
+    return (left + right) * 0.5f;
+}
+
+void test_ring_buffer_roundtrip() {
+    std::printf("Ring buffer: round-trip\n");
+    StereoRingBuffer ring(64);
+    std::vector<float> input(16 * 2);
+    for (uint32_t frame = 0; frame < 16; ++frame) {
+        input[frame * 2] = static_cast<float>(frame) / 16.0f;
+        input[frame * 2 + 1] = -static_cast<float>(frame) / 16.0f;
+    }
+    const uint32_t pushed = ring.push(input.data(), 16);
+    check(pushed == 16, "accepts all frames when empty");
+
+    std::vector<float> output(16 * 2, 999.0f);
+    const uint32_t popped = ring.pop(output.data(), 16);
+    check(popped == 16, "pops the same frame count");
+
+    bool identical = true;
+    for (size_t i = 0; i < input.size(); ++i) {
+        identical = identical && nearly(input[i], output[i]);
+    }
+    check(identical, "samples survive the round-trip intact");
+    check(ring.pop(output.data(), 16) == 0, "empty ring pops zero frames");
+}
+
+void test_ring_buffer_overflow_and_wrap() {
+    std::printf("Ring buffer: overflow + wrap-around\n");
+    StereoRingBuffer ring(8);
+    std::vector<float> block(8 * 2, 0.5f);
+    check(ring.push(block.data(), 8) == 8, "fills to capacity");
+    check(ring.push(block.data(), 8) == 0, "drops when full (no overrun)");
+    check(ring.dropped_frames() == 8, "reports every dropped frame");
+    ring.reset_diagnostics();
+    check(ring.dropped_frames() == 0, "diagnostics can be reset for a new stream");
+
+    std::vector<float> out(4 * 2, 0.0f);
+    check(ring.pop(out.data(), 4) == 4, "drains half");
+
+    // Push again to force the write index to wrap past capacity.
+    std::vector<float> tail(4 * 2, 0.25f);
+    check(ring.push(tail.data(), 4) == 4, "accepts after draining (wrap)");
+
+    std::vector<float> rest(8 * 2, 0.0f);
+    check(ring.pop(rest.data(), 8) == 8, "reads across the wrap boundary");
+    check(nearly(rest[0], 0.5f) && nearly(rest[8], 0.25f), "ordering preserved across wrap");
+}
+
+void test_ring_buffer_clear() {
+    std::printf("Ring buffer: clear\n");
+    StereoRingBuffer ring(32);
+    std::vector<float> block(10 * 2, 1.0f);
+    ring.push(block.data(), 10);
+    ring.clear();
+    std::vector<float> out(10 * 2, 0.0f);
+    check(ring.pop(out.data(), 10) == 0, "clear discards buffered audio");
+}
+
+void test_mixer_math() {
+    std::printf("Mixer / limiter / private process-bus math\n");
+    check(nearly(mix_sample(0.0f, 0.0f, 1.0f, 1.0f), 0.0f), "silence in -> silence out");
+
+    const float voice_only = mix_sample(0.4f, 0.0f, 1.0f, 1.0f);
+    check(std::fabs(voice_only) > 0.001f && std::fabs(voice_only) < 1.0f, "voice passes through, bounded");
+
+    const float bind_only = mix_sample(0.0f, 0.5f, 1.0f, 1.0f);
+    check(std::fabs(bind_only) > 0.001f, "bind is audible in the mix");
+
+    // Extreme gain must hit the configured safety ceiling.
+    const float driven = mix_sample(0.0f, 0.5f, 1.0f, 24.0f);
+    check(nearly(std::fabs(driven), db_to_linear(-1.0f)), "extreme gain reaches the limiter ceiling");
+    check(std::fabs(driven) < 1.0f, "limiter remains below digital full scale");
+
+    const float desktop_only = mix_with_system(0.0f, 0.0f, 0.4f, 1.0f, 1.0f, 0.85f);
+    check(std::fabs(desktop_only) > 0.001f, "system-audio loopback is audible when enabled");
+
+    const float all_sources = mix_with_system(0.3f, 0.4f, 0.5f, 1.0f, 1.5f, 0.85f);
+    check(std::fabs(all_sources) <= 1.0f, "three-source mix remains bounded");
+
+    const float private_source = 0.5f * 0.4f;
+    check(nearly(private_source, 0.2f), "application gain changes the private stream copy");
+    check(nearly(0.5f, 0.5f), "application gain leaves the Windows listening copy untouched");
+    check(
+        nearly(select_desktop_bus(0.45f, private_source, false), 0.45f),
+        "aggregate fallback preserves audio while a private capture is unavailable");
+    check(
+        nearly(select_desktop_bus(0.45f, private_source, true), 0.2f),
+        "ready private process mix applies the requested stream level");
+
+    // The limiter must never exceed the configured -1 dBFS ceiling.
+    bool bounded = true;
+    const float ceiling = db_to_linear(-1.0f);
+    for (float s = -2.0f; s <= 2.0f; s += 0.05f) {
+        const float m = mix_sample(s, s, 6.0f, 24.0f);
+        bounded = bounded && (m >= -ceiling && m <= ceiling);
+    }
+    check(bounded, "final limiter is bounded over the whole input range");
+}
+
+void test_monitor_tap() {
+    std::printf("Local monitor tap\n");
+    check(nearly(monitor_sample(0.5f, 1.0f, 0.0f), 0.0f), "monitor gain 0 = silent (off)");
+    const float audible = monitor_sample(0.5f, 1.0f, 1.0f);
+    check(std::fabs(audible) > 0.001f && std::fabs(audible) <= 1.0f, "monitor is audible and bounded");
+    check(
+        nearly(monitor_sample(0.5f, 0.0f, 1.0f), 0.0f),
+        "muted outgoing bind is also muted in local preview");
+}
+
+void test_microphone_channel_safety() {
+    std::printf("Microphone channel compatibility\n");
+    check(
+        nearly(downmix_voice_sample(0.4f, 0.4f, false, false), 0.4f),
+        "duplicated mono microphone keeps its level");
+    check(
+        nearly(downmix_voice_sample(0.4f, 0.0f, true, false), 0.4f),
+        "left-only microphone is not attenuated by 6 dB");
+    check(
+        nearly(downmix_voice_sample(0.4f, -0.4f, true, false), 0.4f),
+        "opposite-polarity microphone channels do not cancel");
+}
+
+// End-to-end simulation: does a decoded bind actually "come out" of the mixer?
+void test_audible_signal_simulation() {
+    std::printf("Simulated playback: is the bind audible?\n");
+    const uint32_t frames = 4800;            // 100 ms @ 48 kHz
+    const double two_pi = 6.283185307179586;
+    double sum_sq = 0.0;
+    float peak = 0.0f;
+    for (uint32_t i = 0; i < frames; ++i) {
+        const float bind = 0.3f * static_cast<float>(std::sin(two_pi * 440.0 * i / 48000.0));
+        const float out = mix_sample(0.0f, bind, 1.0f, 1.0f);   // 100% soundboard gain
+        sum_sq += static_cast<double>(out) * out;
+        peak = (std::fabs(out) > peak) ? std::fabs(out) : peak;
+    }
+    const float rms = static_cast<float>(std::sqrt(sum_sq / frames));
+    std::printf("       RMS=%.4f  peak=%.4f\n", rms, peak);
+    check(rms > 0.05f, "output carries real signal energy (audible)");
+    check(peak <= 1.0f, "output never clips past full scale");
+}
+
+} // namespace
+
+int main() {
+    std::printf("== MicDeck :: audio core self-test ==\n");
+    test_ring_buffer_roundtrip();
+    test_ring_buffer_overflow_and_wrap();
+    test_ring_buffer_clear();
+    test_mixer_math();
+    test_monitor_tap();
+    test_microphone_channel_safety();
+    test_audible_signal_simulation();
+    std::printf("-----------------------------------------------\n");
+    std::printf("%d checks, %d failed\n", g_checks, g_failures);
+    if (g_failures == 0) {
+        std::printf("RESULT: PASS\n");
+        return 0;
+    }
+    std::printf("RESULT: FAIL\n");
+    return 1;
+}

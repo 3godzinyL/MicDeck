@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MicDeck VAD certification report",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "product",
+    "configuration",
+    "finalStatus",
+    "stages"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "product": { "const": "MicDeck VAD" },
+    "configuration": {
+      "enum": ["Debug", "Release"]
+    },
+    "finalStatus": {
+      "enum": [
+        "all-requested-gates-passed",
+        "not-certified"
+      ]
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status"],
+        "properties": {
+          "name": { "type": "string" },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "skipped",
+              "pending"
+            ]
+          },
+          "details": { "type": "string" },
+          "artifact": { "type": "string" },
+          "utc": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

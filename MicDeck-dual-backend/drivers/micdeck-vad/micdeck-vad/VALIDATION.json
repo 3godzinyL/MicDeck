@@ -1,0 +1,90 @@
+{
+  "package": "MicDeckVad v0.3 final verification gates",
+  "generated_at": "2026-07-26",
+  "source_files": 58,
+  "source_lines": 3715,
+  "all_text_files": 79,
+  "all_text_lines": 4537,
+  "empty_source_files": [],
+  "placeholder_hits": [],
+  "portable_tests": {
+    "core_tests": {
+      "compile_ok": true,
+      "compile_output": "",
+      "run_ok": true,
+      "run_output": "MicDeck audio core tests: PASS"
+    },
+    "pipeline_tests": {
+      "compile_ok": true,
+      "compile_output": "",
+      "run_ok": true,
+      "run_output": "MicDeck cable pipeline tests: PASS"
+    }
+  },
+  "xml_projects": {
+    "driver/MicDeckVad.vcxproj": "ok",
+    "tools/vadctl/vadctl.vcxproj": "ok",
+    "integration/driver-helper/micdeck-driver-helper.vcxproj": "ok"
+  },
+  "rust_source_static_checks": {
+    "integration/tauri-rust/src/helper.rs": {
+      "brace_balance": true,
+      "no_todo": true
+    },
+    "integration/tauri-rust/src/package.rs": {
+      "brace_balance": true,
+      "no_todo": true
+    },
+    "integration/tauri-rust/src/lib.rs": {
+      "brace_balance": true,
+      "no_todo": true
+    },
+    "integration/tauri-rust/src/model.rs": {
+      "brace_balance": true,
+      "no_todo": true
+    },
+    "integration/tauri-rust/src/sha256.rs": {
+      "brace_balance": true,
+      "no_todo": true
+    }
+  },
+  "kernel_wdk_build": {
+    "performed": false,
+    "reason": "Windows WDK unavailable in this environment"
+  },
+  "runtime_driver_test": {
+    "performed": false,
+    "reason": "No Windows kernel test VM available"
+  },
+  "production_signing": {
+    "performed": false
+  },
+  "claims": {
+    "portable_core_compiled_with_werror": true,
+    "portable_tests_passed": true,
+    "kernel_driver_compiled": false,
+    "kernel_driver_runtime_tested": false,
+    "production_signed": false,
+    "portable_audio_tests_passed": true,
+    "windows_wdk_gate_included": true,
+    "windows_wdk_gate_executed_here": false,
+    "e2e_certifier_included": true,
+    "e2e_audio_executed_here": false,
+    "production_ready": false
+  },
+  "final_updates": [
+    {
+      "name": "Pinned official Microsoft baseline",
+      "runtime_verified_here": false
+    },
+    {
+      "name": "Full Windows WDK/package certification gate",
+      "runtime_verified_here": false
+    },
+    {
+      "name": "Automatic render-to-capture WASAPI certifier",
+      "runtime_verified_here": false
+    }
+  ],
+  "honest_status": "The package now contains gates that can prove a build/runtime result on Windows, but those Windows gates were not executable in this Linux environment."
+}
