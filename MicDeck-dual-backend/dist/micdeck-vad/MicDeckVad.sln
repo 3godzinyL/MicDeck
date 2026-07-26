@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{BC8A1FFA-BEE3-4634-8014-F334798102B3}") = "MicDeckVad", "driver\MicDeckVad.vcxproj", "{6E1C34C8-73D7-430A-92D1-33B705E77B03}"
+EndProject
+Project("{BC8A1FFA-BEE3-4634-8014-F334798102B3}") = "vadctl", "tools\vadctl\vadctl.vcxproj", "{0D099E3D-C63A-43B7-A33B-E69C73B9805C}"
+EndProject
+Project("{BC8A1FFA-BEE3-4634-8014-F334798102B3}") = "micdeck-driver-helper", "integration\driver-helper\micdeck-driver-helper.vcxproj", "{A5B0A71E-9898-42D8-9097-3A2E6EA692BB}"
+EndProject
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|x64 = Debug|x64
+        Release|x64 = Release|x64
+    EndGlobalSection
+    GlobalSection(ProjectConfigurationPlatforms) = postSolution
+        {6E1C34C8-73D7-430A-92D1-33B705E77B03}.Debug|x64.ActiveCfg = Debug|x64
+        {6E1C34C8-73D7-430A-92D1-33B705E77B03}.Debug|x64.Build.0 = Debug|x64
+        {6E1C34C8-73D7-430A-92D1-33B705E77B03}.Release|x64.ActiveCfg = Release|x64
+        {6E1C34C8-73D7-430A-92D1-33B705E77B03}.Release|x64.Build.0 = Release|x64
+        {0D099E3D-C63A-43B7-A33B-E69C73B9805C}.Debug|x64.ActiveCfg = Debug|x64
+        {0D099E3D-C63A-43B7-A33B-E69C73B9805C}.Debug|x64.Build.0 = Debug|x64
+        {0D099E3D-C63A-43B7-A33B-E69C73B9805C}.Release|x64.ActiveCfg = Release|x64
+        {0D099E3D-C63A-43B7-A33B-E69C73B9805C}.Release|x64.Build.0 = Release|x64
+        {A5B0A71E-9898-42D8-9097-3A2E6EA692BB}.Debug|x64.ActiveCfg = Debug|x64
+        {A5B0A71E-9898-42D8-9097-3A2E6EA692BB}.Debug|x64.Build.0 = Debug|x64
+        {A5B0A71E-9898-42D8-9097-3A2E6EA692BB}.Release|x64.ActiveCfg = Release|x64
+        {A5B0A71E-9898-42D8-9097-3A2E6EA692BB}.Release|x64.Build.0 = Release|x64
+    EndGlobalSection
+EndGlobal
