@@ -1,5 +1,5 @@
-mod native_audio;
-mod virtual_audio;
+pub mod native_audio;
+pub mod virtual_audio;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{Decoder, Source};
