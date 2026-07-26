@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current"
+         xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{6E1C34C8-73D7-430A-92D1-33B705E77B03}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>MicDeckVad</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'"
+                 Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <TargetVersion>Windows10</TargetVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'"
+                 Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <TargetVersion>Windows10</TargetVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>
+        $(ProjectDir)src;$(ProjectDir)include;$(ProjectDir)..\shared;%(AdditionalIncludeDirectories)
+      </AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>
+        _KERNEL_MODE;UNICODE;_UNICODE;%(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <BufferSecurityCheck>true</BufferSecurityCheck>
+      <SDLCheck>true</SDLCheck>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>
+        portcls.lib;ksguid.lib;wdmsec.lib;ntstrsafe.lib;%(AdditionalDependencies)
+      </AdditionalDependencies>
+      <EntryPointSymbol>DriverEntry</EntryPointSymbol>
+    </Link>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="src\adapter.cpp" />
+    <ClCompile Include="src\audio_clock.cpp" />
+    <ClCompile Include="src\driver.cpp" />
+    <ClCompile Include="src\endpoint_descriptors.cpp" />
+    <ClCompile Include="src\format.cpp" />
+    <ClCompile Include="src\miniport_topology.cpp" />
+    <ClCompile Include="src\miniport_wave_rt.cpp" />
+    <ClCompile Include="src\miniport_wave_rt_stream.cpp" />
+    <ClCompile Include="src\new_delete.cpp" />
+    <ClCompile Include="src\virtual_cable.cpp" />
+    <ClCompile Include="..\shared\micdeck_cable_pipeline.cpp" />
+    <ClCompile Include="src\property_handlers.cpp" />
+    <ClCompile Include="src\power_management.cpp" />
+    <ClCompile Include="src\master_clock.cpp" />
+    <ClCompile Include="..\shared\micdeck_audio_core.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="src\adapter.h" />
+    <ClInclude Include="src\audio_clock.h" />
+    <ClInclude Include="src\common.h" />
+    <ClInclude Include="src\endpoint_descriptors.h" />
+    <ClInclude Include="src\format.h" />
+    <ClInclude Include="src\miniport_topology.h" />
+    <ClInclude Include="src\miniport_wave_rt.h" />
+    <ClInclude Include="src\miniport_wave_rt_stream.h" />
+    <ClInclude Include="src\virtual_cable.h" />
+    <ClInclude Include="..\shared\micdeck_cable_pipeline.h" />
+    <ClInclude Include="src\property_handlers.h" />
+    <ClInclude Include="src\power_management.h" />
+    <ClInclude Include="src\master_clock.h" />
+    <ClInclude Include="include\micdeck_vad_public.h" />
+    <ClInclude Include="..\shared\micdeck_audio_core.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Inf Include="..\package\MicDeckVad.inf" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
