@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/microsoft/Windows-driver-samples.git",
+  "commit": "2ee527bfeb0aeb6be11f0a8b6dce4011b358ce89",
+  "referenceProjects": [
+    "audio/simpleaudiosample",
+    "audio/sysvad"
+  ],
+  "purpose": "Pin the exact official Microsoft audio-driver reference used for WDK contract and environment validation."
+}
