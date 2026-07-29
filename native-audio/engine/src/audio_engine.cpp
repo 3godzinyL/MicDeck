@@ -220,6 +220,52 @@ float stereo_rms(const float* samples, uint32_t frames) {
     return static_cast<float>(std::sqrt(energy / (frames * 2u)));
 }
 
+bool voice_processing_active(const VoiceProcessingConfig& config) {
+    return config.aec_enabled ||
+        config.rnnoise_enabled ||
+        config.auto_level_enabled ||
+        config.noise_gate_enabled;
+}
+
+// WASAPI exposes every capture endpoint as stereo because that is the engine's
+// transport format. Real microphones are not guaranteed to populate those two
+// channels in the same way: some duplicate mono, some use only one side, and
+// some interfaces expose opposite-polarity channels. Blindly averaging L+R
+// made one-sided microphones 6 dB quieter and could cancel differential inputs
+// almost completely. Keep the normal average for a correlated stereo pair, but
+// select the stronger channel when averaging would lose real voice energy.
+void downmix_microphone(
+    const float* stereo,
+    float* mono,
+    uint32_t frames) {
+    double left_energy = 0.0;
+    double right_energy = 0.0;
+    double correlation = 0.0;
+    for (uint32_t frame = 0; frame < frames; ++frame) {
+        const float left = stereo[frame * 2u];
+        const float right = stereo[frame * 2u + 1u];
+        left_energy += static_cast<double>(left) * left;
+        right_energy += static_cast<double>(right) * right;
+        correlation += static_cast<double>(left) * right;
+    }
+
+    const double stronger = (std::max)(left_energy, right_energy);
+    const double weaker = (std::min)(left_energy, right_energy);
+    const double normalized_correlation = stronger > 1.0e-12
+        ? correlation / std::sqrt((std::max)(left_energy * right_energy, 1.0e-24))
+        : 1.0;
+    const bool unsafe_to_average =
+        stronger > 1.0e-12 &&
+        (weaker < stronger * 0.04 || normalized_correlation < -0.20);
+    const uint32_t selected_channel = right_energy > left_energy ? 1u : 0u;
+
+    for (uint32_t frame = 0; frame < frames; ++frame) {
+        mono[frame] = unsafe_to_average
+            ? stereo[frame * 2u + selected_channel]
+            : (stereo[frame * 2u] + stereo[frame * 2u + 1u]) * 0.5f;
+    }
+}
+
 void apply_mono_voice_dynamics(
     float* samples,
     uint32_t frames,
@@ -234,7 +280,7 @@ void apply_mono_voice_dynamics(
         const float coefficient = gate_target < gate_gain ? 0.35f : 0.06f;
         gate_gain += (gate_target - gate_gain) * coefficient;
     } else {
-        gate_gain += (1.0f - gate_gain) * 0.1f;
+        gate_gain = 1.0f;
     }
 
     if (config.auto_level_enabled && input_db > config.gate_threshold_db - 6.0f) {
@@ -249,7 +295,7 @@ void apply_mono_voice_dynamics(
         const float coefficient = desired_gain < leveler_gain ? 0.45f : 0.025f;
         leveler_gain += (desired_gain - leveler_gain) * coefficient;
     } else if (!config.auto_level_enabled) {
-        leveler_gain += (1.0f - leveler_gain) * 0.08f;
+        leveler_gain = 1.0f;
     }
 
     const float compressor_threshold = db_to_linear(config.target_max_db);
@@ -287,7 +333,7 @@ void apply_stereo_leveler(
         const float coefficient = desired_gain < leveler_gain ? 0.35f : 0.0125f;
         leveler_gain += (desired_gain - leveler_gain) * coefficient;
     } else if (!config.auto_level_enabled) {
-        leveler_gain += (1.0f - leveler_gain) * 0.05f;
+        leveler_gain = 1.0f;
     }
 
     for (uint32_t sample = 0; sample < frames * 2u; ++sample) {
@@ -821,7 +867,6 @@ bool AudioEngine::start(const std::wstring& input_id, const std::wstring& output
     system_leveler_gain_ = 1.0f;
     microphone_gate_gain_ = 1.0f;
     master_limiter_gain_ = 1.0f;
-    process_mix_blend_ = 0.0f;
     stream_source_custom_mode_.store(false, std::memory_order_relaxed);
     expected_stream_sources_.store(0, std::memory_order_relaxed);
     stream_source_manager_stopping_.store(false, std::memory_order_relaxed);
@@ -1174,9 +1219,11 @@ void AudioEngine::pump_microphone_pipeline() {
             0.0f);
     }
 
+    downmix_microphone(
+        microphone_stereo.data(),
+        microphone_mono.data(),
+        kProcessingFrames);
     for (uint32_t frame = 0; frame < kProcessingFrames; ++frame) {
-        microphone_mono[frame] =
-            (microphone_stereo[frame * 2u] + microphone_stereo[frame * 2u + 1u]) * 0.5f;
         reference_mono[frame] =
             (reference_stereo[frame * 2u] + reference_stereo[frame * 2u + 1u]) * 0.5f;
     }
@@ -1227,6 +1274,7 @@ void AudioEngine::render_mix(float* destination, uint32_t frames) {
     sb_get_gains(&microphone_gain, &sound_gain);
     sb_get_system_audio(&system_enabled, &system_gain);
     const VoiceProcessingConfig processing_config = voice_processing_config();
+    const bool process_microphone = voice_processing_active(processing_config);
 
     std::array<float, 4096> microphone{};
     std::array<float, 4096> sound{};
@@ -1238,16 +1286,39 @@ void AudioEngine::render_mix(float* destination, uint32_t frames) {
     uint32_t processed = 0;
     while (processed < frames) {
         const uint32_t chunk = (std::min)(frames - processed, 2048u);
-        while (processed_microphone_.available_read() < chunk &&
-               microphone_.available_read() >= kProcessingFrames) {
-            pump_microphone_pipeline();
+        if (process_microphone) {
+            while (processed_microphone_.available_read() < chunk &&
+                   microphone_.available_read() >= kProcessingFrames) {
+                pump_microphone_pipeline();
+            }
+        } else {
+            // A disabled filter chain is a true dry bypass. In v7 every
+            // microphone still went through a 480-frame mono DSP staging path,
+            // which changed channel layout, added latency, and retained stale
+            // gate/leveler gains even after the UI switches were off.
+            processed_microphone_.clear();
+            system_reference_.clear();
+            microphone_leveler_gain_ = 1.0f;
+            microphone_gate_gain_ = 1.0f;
+            voice_probability_.store(0.0f, std::memory_order_relaxed);
         }
         std::fill_n(microphone.data(), static_cast<size_t>(chunk) * 2u, 0.0f);
         std::fill_n(sound.data(), static_cast<size_t>(chunk) * 2u, 0.0f);
         std::fill_n(system.data(), static_cast<size_t>(chunk) * 2u, 0.0f);
         std::fill_n(process_system.data(), static_cast<size_t>(chunk) * 2u, 0.0f);
-        const uint32_t microphone_frames =
-            processed_microphone_.pop(microphone.data(), chunk);
+        const uint32_t microphone_frames = process_microphone
+            ? processed_microphone_.pop(microphone.data(), chunk)
+            : microphone_.pop(microphone.data(), chunk);
+        if (!process_microphone) {
+            float dry_peak = 0.0f;
+            for (uint32_t sample = 0; sample < microphone_frames * 2u; ++sample) {
+                dry_peak = (std::max)(dry_peak, std::abs(microphone[sample]));
+            }
+            microphone_output_peak_.store(dry_peak, std::memory_order_relaxed);
+            if (processing_config.voice_monitor_enabled && microphone_frames > 0) {
+                voice_monitor_.push(microphone.data(), microphone_frames);
+            }
+        }
         const uint32_t sound_frames = sb_pop_audio(sound.data(), chunk);
         const uint32_t system_frames = system_audio_.pop(system.data(), chunk);
 
@@ -1306,27 +1377,28 @@ void AudioEngine::render_mix(float* destination, uint32_t frames) {
             active_sources[index]->readers.fetch_sub(1, std::memory_order_release);
         }
 
-        const float target_process_blend = process_mix_ready ? 1.0f : 0.0f;
         float desktop_input_peak = 0.0f;
         for (uint32_t frame = 0; frame < chunk; ++frame) {
-            const float blend_delta = target_process_blend - process_mix_blend_;
-            process_mix_blend_ +=
-                std::clamp(blend_delta, -0.00035f, 0.00020f);
             for (uint32_t channel = 0; channel < 2u; ++channel) {
                 const size_t sample = static_cast<size_t>(frame) * 2u + channel;
                 const float aggregate_sample =
                     frame < system_frames ? system[sample] : 0.0f;
                 const float process_sample =
                     process_mix_ready ? process_system[sample] : 0.0f;
-                system[sample] =
-                    aggregate_sample * (1.0f - process_mix_blend_) +
-                    process_sample * process_mix_blend_;
+                // Aggregate and process-loopback captures have independent
+                // clocks and delays. Crossfading them mixes two copies of the
+                // same signal out of phase, producing comb filtering and the
+                // severe "underwater" Live quality regression. Select exactly
+                // one complete bus; aggregate is the lossless fallback.
+                system[sample] = process_mix_ready
+                    ? process_sample
+                    : aggregate_sample;
                 desktop_input_peak =
                     (std::max)(desktop_input_peak, std::abs(system[sample]));
             }
         }
         const uint32_t desktop_frames =
-            system_frames > 0 || process_mix_ready || process_mix_blend_ > 0.0001f
+            system_frames > 0 || process_mix_ready
             ? chunk
             : 0u;
         system_peak_.store(desktop_input_peak, std::memory_order_relaxed);
@@ -1347,7 +1419,13 @@ void AudioEngine::render_mix(float* destination, uint32_t frames) {
         if (!system_enabled &&
             monitor_active_.load(std::memory_order_relaxed) &&
             sound_frames > 0) {
-            monitor_.push(sound.data(), sound_frames);
+            // Monitor the same post-gain bind that is sent to the virtual
+            // cable. This prevents a loud local preview from hiding a muted or
+            // very quiet outgoing soundboard path.
+            for (uint32_t sample = 0; sample < sound_frames * 2u; ++sample) {
+                process_source[sample] = sound[sample] * sound_gain;
+            }
+            monitor_.push(process_source.data(), sound_frames);
         }
         if (microphone_frames < chunk) {
             underruns_.fetch_add(1, std::memory_order_relaxed);

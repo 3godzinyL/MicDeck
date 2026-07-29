@@ -70,7 +70,7 @@ struct SessionHistory {
 
 std::mutex g_state_mutex;
 std::unordered_map<uint64_t, SessionHistory> g_history;
-std::unordered_map<uint64_t, float> g_desired_volumes;
+std::unordered_map<uint32_t, float> g_desired_process_volumes;
 std::mutex g_wait_mutex;
 std::condition_variable g_wait_condition;
 std::thread g_monitor_thread;
@@ -360,7 +360,19 @@ void publish_stream_sources_locked() {
     for (const auto& [_, history] : g_history) {
         if (history.identity.process_id != 0 &&
             (history.rendering || std::abs(history.volume - 1.0f) > 0.0005f)) {
-            ordered.push_back(&history);
+            const auto duplicate = std::find_if(
+                ordered.begin(),
+                ordered.end(),
+                [&history](const SessionHistory* candidate) {
+                    return candidate->identity.process_id == history.identity.process_id;
+                });
+            if (duplicate == ordered.end()) {
+                ordered.push_back(&history);
+            } else if ((!(*duplicate)->rendering && history.rendering) ||
+                       ((*duplicate)->rendering == history.rendering &&
+                        history.last_active_tick > (*duplicate)->last_active_tick)) {
+                *duplicate = &history;
+            }
         }
     }
     std::sort(
@@ -417,9 +429,9 @@ bool update_history(std::unordered_map<uint64_t, ObservedSession> observed) {
                 extract_icon_rgba(session.identity.executable_path);
         }
         history->second.peak = session.peak;
-        const auto desired = g_desired_volumes.find(key);
+        const auto desired = g_desired_process_volumes.find(session.identity.process_id);
         history->second.volume =
-            desired == g_desired_volumes.end() ? 1.0f : desired->second;
+            desired == g_desired_process_volumes.end() ? 1.0f : desired->second;
         history->second.muted = history->second.volume <= 0.0001f;
         history->second.active = session.active;
         history->second.rendering = session.rendering;
@@ -446,10 +458,23 @@ bool update_history(std::unordered_map<uint64_t, ObservedSession> observed) {
             }
         }
         if (now - history->second.last_seen_tick > kMissingSessionRetentionMs) {
-            g_desired_volumes.erase(history->first);
             history = g_history.erase(history);
         } else {
             ++history;
+        }
+    }
+    for (auto desired = g_desired_process_volumes.begin();
+         desired != g_desired_process_volumes.end();) {
+        const bool process_still_known = std::any_of(
+            g_history.begin(),
+            g_history.end(),
+            [process_id = desired->first](const auto& entry) {
+                return entry.second.identity.process_id == process_id;
+            });
+        if (process_still_known) {
+            ++desired;
+        } else {
+            desired = g_desired_process_volumes.erase(desired);
         }
     }
     publish_stream_sources_locked();
@@ -573,9 +598,21 @@ int __cdecl sb_set_audio_session_volume(uint64_t session_key, float volume) {
     if (history == g_history.end()) {
         return 0;
     }
-    g_desired_volumes[session_key] = volume;
-    history->second.volume = volume;
-    history->second.muted = volume <= 0.0001f;
+    // Windows process-loopback captures a process tree, not an individual
+    // IAudioSessionControl. Multiple sessions belonging to one PID therefore
+    // contain the same audio. Keep their controls together and publish that PID
+    // once; otherwise the old code summed duplicate captures and damaged the
+    // Live signal.
+    const uint32_t process_id = history->second.identity.process_id;
+    g_desired_process_volumes[process_id] = volume;
+    for (auto& entry : g_history) {
+        SessionHistory& candidate = entry.second;
+        if (candidate.identity.process_id != process_id) {
+            continue;
+        }
+        candidate.volume = volume;
+        candidate.muted = volume <= 0.0001f;
+    }
     publish_stream_sources_locked();
     return 1;
 }

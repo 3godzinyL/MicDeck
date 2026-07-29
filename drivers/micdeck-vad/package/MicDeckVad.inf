@@ -1,0 +1,100 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=MEDIA
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderName%
+DriverVer=07/26/2026,0.3.0.0
+CatalogFile=MicDeckVad.cat
+PnpLockdown=1
+
+[Manufacturer]
+%ProviderName%=MicDeck,NTamd64.10.0
+
+[MicDeck.NTamd64.10.0]
+%MicDeckVad.DeviceDesc%=MicDeckVad_Install,ROOT\MICDECKVAD
+
+[SourceDisksFiles]
+MicDeckVad.sys=1
+[SourceDisksNames]
+1=%DiskName%,,,
+[DestinationDirs]
+DefaultDestDir=13
+MicDeckVad.CopyFiles=13
+
+[MicDeckVad_Install.NT]
+CopyFiles=MicDeckVad.CopyFiles
+[MicDeckVad.CopyFiles]
+MicDeckVad.sys
+
+[MicDeckVad_Install.NT.Services]
+AddService=MicDeckVad,0x00000002,MicDeckVad_Service
+[MicDeckVad_Service]
+DisplayName=%MicDeckVad.ServiceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\MicDeckVad.sys
+LoadOrderGroup=AudioGroup
+
+[MicDeckVad_Install.NT.HW]
+AddReg=MicDeckVad.Hardware.AddReg
+[MicDeckVad.Hardware.AddReg]
+HKR,,FriendlyName,0x00000000,%MicDeckVad.DeviceDesc%
+HKR,,DriverVersion,0x00000000,"0.3.0"
+HKR,,DriverAbi,0x00010001,3
+HKR,,DefaultLatencyMode,0x00010001,1
+
+; The reference strings must match the names passed to PcRegisterSubdevice in
+; adapter.cpp. Registering on GLOBAL instead attaches the interfaces to the device
+; rather than to the subdevices, and Windows then builds no audio endpoint at all.
+[MicDeckVad_Install.NT.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_RenderWave%,MicDeckVad.RenderWave.Interface
+AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_RenderWave%,MicDeckVad.RenderWave.Interface
+AddInterface=%KSCATEGORY_RENDER%,%KSNAME_RenderWave%,MicDeckVad.RenderWave.Interface
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_RenderTopology%,MicDeckVad.RenderTopology.Interface
+AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_RenderTopology%,MicDeckVad.RenderTopology.Interface
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_CaptureWave%,MicDeckVad.CaptureWave.Interface
+AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_CaptureWave%,MicDeckVad.CaptureWave.Interface
+AddInterface=%KSCATEGORY_CAPTURE%,%KSNAME_CaptureWave%,MicDeckVad.CaptureWave.Interface
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_CaptureTopology%,MicDeckVad.CaptureTopology.Interface
+AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_CaptureTopology%,MicDeckVad.CaptureTopology.Interface
+
+[MicDeckVad.RenderWave.Interface]
+AddReg=MicDeckVad.RenderWave.AddReg
+[MicDeckVad.RenderTopology.Interface]
+AddReg=MicDeckVad.RenderTopology.AddReg
+[MicDeckVad.CaptureWave.Interface]
+AddReg=MicDeckVad.CaptureWave.AddReg
+[MicDeckVad.CaptureTopology.Interface]
+AddReg=MicDeckVad.CaptureTopology.AddReg
+
+[MicDeckVad.RenderWave.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%MicDeckVad.RenderName%
+[MicDeckVad.RenderTopology.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%MicDeckVad.RenderName%
+[MicDeckVad.CaptureWave.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%MicDeckVad.CaptureName%
+[MicDeckVad.CaptureTopology.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%MicDeckVad.CaptureName%
+
+[Strings]
+ProviderName="MicDeck Project"
+DiskName="MicDeck Virtual Audio Driver installation media"
+MicDeckVad.DeviceDesc="MicDeck Virtual Audio Cable"
+MicDeckVad.ServiceDesc="MicDeck Virtual Audio Driver"
+MicDeckVad.RenderName="MicDeck Driver Input"
+MicDeckVad.CaptureName="MicDeck Virtual Microphone"
+KSNAME_RenderWave="MicDeckRenderWave"
+KSNAME_RenderTopology="MicDeckRenderTopology"
+KSNAME_CaptureWave="MicDeckCaptureWave"
+KSNAME_CaptureTopology="MicDeckCaptureTopology"
+Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_TOPOLOGY="{DDA54A40-1E4C-11D1-A050-405705C10000}"
+KSCATEGORY_REALTIME="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"

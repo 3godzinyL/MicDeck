@@ -10,7 +10,7 @@
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     HANDLE instance_mutex =
-        CreateMutexW(nullptr, TRUE, L"Local\\MicDeck.AudioEngine.v7");
+        CreateMutexW(nullptr, TRUE, L"Local\\MicDeck.AudioEngine.v8");
     if (instance_mutex == nullptr) {
         return 4;
     }

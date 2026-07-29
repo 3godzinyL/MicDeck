@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define SB_PROTOCOL_MAGIC 0x53424155u
-#define SB_PROTOCOL_VERSION 7u
+#define SB_PROTOCOL_VERSION 8u
 #define SB_SAMPLE_RATE 48000u
 #define SB_CHANNELS 2u
 #define SB_AUDIO_CAPACITY_FRAMES (SB_SAMPLE_RATE * 2u)
@@ -14,9 +14,9 @@
 #define SB_STREAM_SOURCE_CAPACITY 12u
 #endif
 
-#define SB_MAPPING_NAME L"Local\\MicDeck.Audio.v7"
-#define SB_AUDIO_EVENT_NAME L"Local\\MicDeck.AudioData.v7"
-#define SB_CONFIG_EVENT_NAME L"Local\\MicDeck.Config.v7"
+#define SB_MAPPING_NAME L"Local\\MicDeck.Audio.v8"
+#define SB_AUDIO_EVENT_NAME L"Local\\MicDeck.AudioData.v8"
+#define SB_CONFIG_EVENT_NAME L"Local\\MicDeck.Config.v8"
 
 enum SbEngineState {
     SB_ENGINE_STOPPED = 0,

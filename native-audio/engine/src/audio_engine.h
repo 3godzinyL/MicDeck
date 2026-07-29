@@ -127,6 +127,5 @@ private:
     float system_leveler_gain_{1.0f};
     float microphone_gate_gain_{1.0f};
     float master_limiter_gain_{1.0f};
-    float process_mix_blend_{0.0f};
     std::wstring warning_;
 };

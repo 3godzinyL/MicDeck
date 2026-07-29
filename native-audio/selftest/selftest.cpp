@@ -69,9 +69,19 @@ float select_desktop_bus(
     return private_mix_ready ? private_process_mix : aggregate;
 }
 
-// Mirrors AudioEngine::render_monitor: monitor = tanh(sound*monitorGain).
-float monitor_sample(float sound, float monitor_gain) {
-    return std::tanh(sound * monitor_gain);
+float monitor_sample(float sound, float sound_gain, float monitor_gain) {
+    return std::tanh(sound * sound_gain * monitor_gain);
+}
+
+float downmix_voice_sample(
+    float left,
+    float right,
+    bool unsafe_to_average,
+    bool select_right) {
+    if (unsafe_to_average) {
+        return select_right ? right : left;
+    }
+    return (left + right) * 0.5f;
 }
 
 void test_ring_buffer_roundtrip() {
@@ -172,9 +182,25 @@ void test_mixer_math() {
 
 void test_monitor_tap() {
     std::printf("Local monitor tap\n");
-    check(nearly(monitor_sample(0.5f, 0.0f), 0.0f), "monitor gain 0 = silent (off)");
-    const float audible = monitor_sample(0.5f, 1.0f);
+    check(nearly(monitor_sample(0.5f, 1.0f, 0.0f), 0.0f), "monitor gain 0 = silent (off)");
+    const float audible = monitor_sample(0.5f, 1.0f, 1.0f);
     check(std::fabs(audible) > 0.001f && std::fabs(audible) <= 1.0f, "monitor is audible and bounded");
+    check(
+        nearly(monitor_sample(0.5f, 0.0f, 1.0f), 0.0f),
+        "muted outgoing bind is also muted in local preview");
+}
+
+void test_microphone_channel_safety() {
+    std::printf("Microphone channel compatibility\n");
+    check(
+        nearly(downmix_voice_sample(0.4f, 0.4f, false, false), 0.4f),
+        "duplicated mono microphone keeps its level");
+    check(
+        nearly(downmix_voice_sample(0.4f, 0.0f, true, false), 0.4f),
+        "left-only microphone is not attenuated by 6 dB");
+    check(
+        nearly(downmix_voice_sample(0.4f, -0.4f, true, false), 0.4f),
+        "opposite-polarity microphone channels do not cancel");
 }
 
 // End-to-end simulation: does a decoded bind actually "come out" of the mixer?
@@ -205,6 +231,7 @@ int main() {
     test_ring_buffer_clear();
     test_mixer_math();
     test_monitor_tap();
+    test_microphone_channel_safety();
     test_audible_signal_simulation();
     std::printf("-----------------------------------------------\n");
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
