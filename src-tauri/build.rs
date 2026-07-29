@@ -157,8 +157,72 @@ fn build_native_audio() {
     run_msvc(&vsdev, &out_dir, &engine_command);
 }
 
+/// Stages the MicDeck VAD kernel driver package so `virtual_audio.rs` can embed it.
+///
+/// The kernel binaries cannot be produced by this build script — they need the WDK and a
+/// cross-signing certificate — so `scripts/stage-micdeck-vad-package.ps1` drops the signed
+/// artifacts into `resources/micdeck-vad/package`. When that directory is empty the build
+/// still succeeds and the app falls back to VB-CABLE, which is what
+/// `MICDECK_VAD_PACKAGE_READY=0` signals to the runtime.
+#[cfg(target_os = "windows")]
+fn stage_micdeck_vad_package() {
+    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("micdeck-vad");
+    fs::create_dir_all(&out_dir).expect("failed to create MicDeck VAD output directory");
+
+    let package_dir = manifest_dir.join("resources/micdeck-vad/package");
+    let mut ready = true;
+    for name in [
+        "MicDeckVad.sys",
+        "MicDeckVad.inf",
+        "MicDeckVad.cat",
+        "driver-manifest.json",
+    ] {
+        let source = package_dir.join(name);
+        println!("cargo:rerun-if-changed={}", source.display());
+        let bytes = fs::read(&source).unwrap_or_default();
+        ready &= !bytes.is_empty();
+        fs::write(out_dir.join(name), &bytes)
+            .unwrap_or_else(|error| panic!("failed to stage {name}: {error}"));
+    }
+
+    ready &= build_driver_helper(&manifest_dir, &out_dir);
+
+    println!(
+        "cargo:rustc-env=MICDECK_VAD_PACKAGE_READY={}",
+        if ready { "1" } else { "0" }
+    );
+}
+
+/// Compiles the elevated usermode installer that talks to SetupAPI/DIFx.
+///
+/// Returns false instead of panicking when the sources are missing so a source-only checkout
+/// (driver removed for licensing reasons) still builds a working VB-CABLE-only app.
+#[cfg(target_os = "windows")]
+fn build_driver_helper(manifest_dir: &Path, out_dir: &Path) -> bool {
+    let helper_source = manifest_dir.join("../drivers/micdeck-vad/integration/driver-helper/main.cpp");
+    println!("cargo:rerun-if-changed={}", helper_source.display());
+    if !helper_source.is_file() {
+        fs::write(out_dir.join("micdeck-driver-helper.exe"), []).ok();
+        return false;
+    }
+
+    let helper = out_dir.join("micdeck-driver-helper.exe");
+    let vsdev = visual_studio_root().join("Common7/Tools/VsDevCmd.bat");
+    let command = format!(
+        "cl /nologo /O2 /GL /GS /sdl /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE {} newdev.lib setupapi.lib cfgmgr32.lib advapi32.lib /link /LTCG /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /SUBSYSTEM:CONSOLE /OUT:{}",
+        quoted(&helper_source),
+        quoted(&helper)
+    );
+    run_msvc(&vsdev, out_dir, &command);
+    helper.metadata().is_ok_and(|metadata| metadata.len() > 0)
+}
+
 fn main() {
     #[cfg(target_os = "windows")]
-    build_native_audio();
+    {
+        build_native_audio();
+        stage_micdeck_vad_package();
+    }
     tauri_build::build();
 }

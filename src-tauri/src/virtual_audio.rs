@@ -1,13 +1,70 @@
 use cpal::traits::{DeviceTrait, HostTrait};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use zip::ZipArchive;
 
 const DRIVER_ARCHIVE: &[u8] = include_bytes!("../resources/vbcable/VBCABLE_Driver_Pack45.zip");
 const DRIVER_SHA256: &str = "B950E39F01AF1D04EA623C8F6D8EB9B6EA5C477C637295FABF20631C85116BFB";
+
+const MICDECK_VAD_SYS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/micdeck-vad/MicDeckVad.sys"));
+const MICDECK_VAD_INF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/micdeck-vad/MicDeckVad.inf"));
+const MICDECK_VAD_CAT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/micdeck-vad/MicDeckVad.cat"));
+const MICDECK_VAD_MANIFEST: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/micdeck-vad/driver-manifest.json"));
+const MICDECK_VAD_HELPER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/micdeck-vad/micdeck-driver-helper.exe"
+));
+const MICDECK_VAD_PACKAGE_READY: &str = env!("MICDECK_VAD_PACKAGE_READY");
+const MICDECK_VAD_ABI: u32 = 3;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VirtualAudioBackend {
+    #[default]
+    VbCable,
+    MicDeckVad,
+}
+
+impl VirtualAudioBackend {
+    pub const ALL: [Self; 2] = [Self::MicDeckVad, Self::VbCable];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::VbCable => "vbCable",
+            Self::MicDeckVad => "micDeckVad",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::VbCable => "VB-CABLE",
+            Self::MicDeckVad => "MicDeck VAD",
+        }
+    }
+
+    pub const fn vendor(self) -> &'static str {
+        match self {
+            Self::VbCable => "VB-Audio / VB-CABLE Pack45",
+            Self::MicDeckVad => "MicDeck — własny sterownik WaveRT",
+        }
+    }
+
+    pub const fn missing_message(self) -> &'static str {
+        match self {
+            Self::VbCable => {
+                "VB-CABLE nie jest gotowy. Zainstaluj sterownik albo uruchom ponownie Windows."
+            }
+            Self::MicDeckVad => {
+                "MicDeck VAD nie odpowiada albo brakuje jednego z jego endpointów audio."
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AudioEndpoint {
@@ -23,51 +80,84 @@ pub struct DriverBootstrap {
     pub error: Option<String>,
 }
 
-pub fn cable_render_endpoints() -> Vec<AudioEndpoint> {
-    let Ok(devices) = cpal::default_host().output_devices() else {
-        return Vec::new();
-    };
-
-    devices.filter_map(endpoint_if_vb_cable).collect()
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendProbe {
+    pub backend: VirtualAudioBackend,
+    pub key: &'static str,
+    pub label: &'static str,
+    pub vendor: &'static str,
+    pub installed: bool,
+    pub ready: bool,
+    pub render_endpoint: Option<String>,
+    pub capture_endpoint: Option<String>,
+    pub render_responding: bool,
+    pub capture_responding: bool,
+    pub format_compatible: bool,
+    pub message: String,
+    /// Only meaningful for MicDeck VAD: whether this build embeds a signed package.
+    pub package_available: bool,
 }
 
-pub fn cable_capture_endpoints() -> Vec<AudioEndpoint> {
-    let Ok(devices) = cpal::default_host().input_devices() else {
-        return Vec::new();
-    };
-
-    devices.filter_map(endpoint_if_vb_cable).collect()
+#[derive(Deserialize)]
+struct DriverPackageManifest {
+    version: String,
+    abi: u32,
+    files: Vec<DriverPackageFile>,
 }
 
-pub fn driver_is_ready() -> bool {
-    !cable_render_endpoints().is_empty() && !cable_capture_endpoints().is_empty()
+#[derive(Deserialize)]
+struct DriverPackageFile {
+    name: String,
+    sha256: String,
 }
 
-fn endpoint_if_vb_cable(device: cpal::Device) -> Option<AudioEndpoint> {
+fn fingerprint(device: &cpal::Device) -> Option<(String, String, String, String)> {
     let description = device.description().ok()?;
-    let device_name = description.name().to_lowercase();
-    let driver_name = description.driver().unwrap_or_default().to_lowercase();
-    let fingerprint = [
-        Some(description.name()),
-        description.manufacturer(),
-        description.driver(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" ")
-    .to_lowercase();
+    let name = description.name().to_string();
+    let manufacturer = description.manufacturer().unwrap_or_default().to_lowercase();
+    let driver = description.driver().unwrap_or_default().to_lowercase();
+    let raw_id = device
+        .id()
+        .ok()
+        .map(|id| id.1.to_lowercase())
+        .unwrap_or_default();
+    Some((name, manufacturer, driver, raw_id))
+}
 
-    let is_vb_audio = fingerprint.contains("vb-audio") || fingerprint.contains("vbaudio");
-    let is_cable = fingerprint.contains("cable");
-    let is_standard_driver = driver_name.contains("vb-audio virtual cable");
-    let is_standard_default_name = device_name.starts_with("cable input")
-        || device_name.starts_with("cable in")
-        || device_name.starts_with("cable output");
-    if !is_vb_audio || !is_cable || (!is_standard_driver && !is_standard_default_name) {
-        return None;
+fn matches_backend(device: &cpal::Device, backend: VirtualAudioBackend, render: bool) -> bool {
+    let Some((name, manufacturer, driver, raw_id)) = fingerprint(device) else {
+        return false;
+    };
+    let lower_name = name.to_lowercase();
+    let combined = format!("{lower_name} {manufacturer} {driver} {raw_id}");
+
+    match backend {
+        VirtualAudioBackend::VbCable => {
+            let vendor = combined.contains("vb-audio") || combined.contains("vbaudio");
+            let cable = combined.contains("cable");
+            let expected_name = if render {
+                lower_name.starts_with("cable input") || lower_name.starts_with("cable in")
+            } else {
+                lower_name.starts_with("cable output")
+            };
+            vendor && cable && (expected_name || driver.contains("vb-audio virtual cable"))
+        }
+        VirtualAudioBackend::MicDeckVad => {
+            let expected_name = if render {
+                lower_name.starts_with("micdeck driver input")
+            } else {
+                lower_name.starts_with("micdeck virtual microphone")
+                    || lower_name.starts_with("micdeck virtual mic")
+            };
+            let hardware = combined.contains("micdeckvad") || combined.contains("micdeck vad");
+            expected_name || hardware
+        }
     }
+}
 
+fn endpoint_dto(device: &cpal::Device) -> Option<AudioEndpoint> {
+    let description = device.description().ok()?;
     let id = device.id().ok()?;
     Some(AudioEndpoint {
         cpal_id: id.to_string(),
@@ -76,14 +166,116 @@ fn endpoint_if_vb_cable(device: cpal::Device) -> Option<AudioEndpoint> {
     })
 }
 
+fn collect(backend: VirtualAudioBackend, render: bool) -> Vec<(cpal::Device, AudioEndpoint)> {
+    let host = cpal::default_host();
+    let devices = if render {
+        host.output_devices().ok()
+    } else {
+        host.input_devices().ok()
+    };
+    devices
+        .into_iter()
+        .flatten()
+        .filter(|device| matches_backend(device, backend, render))
+        .filter_map(|device| endpoint_dto(&device).map(|dto| (device, dto)))
+        .collect()
+}
+
+pub fn render_endpoints(backend: VirtualAudioBackend) -> Vec<AudioEndpoint> {
+    collect(backend, true)
+        .into_iter()
+        .map(|(_, dto)| dto)
+        .collect()
+}
+
+pub fn capture_endpoints(backend: VirtualAudioBackend) -> Vec<AudioEndpoint> {
+    collect(backend, false)
+        .into_iter()
+        .map(|(_, dto)| dto)
+        .collect()
+}
+
+/// Every capture endpoint owned by any supported virtual backend. The app hides
+/// these from the physical-microphone picker so users cannot route the loopback
+/// into itself.
+pub fn managed_capture_endpoints() -> Vec<AudioEndpoint> {
+    VirtualAudioBackend::ALL
+        .into_iter()
+        .flat_map(capture_endpoints)
+        .collect()
+}
+
+pub fn driver_is_ready(backend: VirtualAudioBackend) -> bool {
+    probe(backend).ready
+}
+
+pub fn probe(backend: VirtualAudioBackend) -> BackendProbe {
+    let render = collect(backend, true).into_iter().next();
+    let capture = collect(backend, false).into_iter().next();
+    let render_responding = render
+        .as_ref()
+        .is_some_and(|(device, _)| device.default_output_config().is_ok());
+    let capture_responding = capture
+        .as_ref()
+        .is_some_and(|(device, _)| device.default_input_config().is_ok());
+    let render_endpoint = render.map(|(_, dto)| dto);
+    let capture_endpoint = capture.map(|(_, dto)| dto);
+
+    let installed = render_endpoint.is_some() || capture_endpoint.is_some();
+    let format_compatible = render_responding && capture_responding;
+    let ready = render_endpoint.is_some() && capture_endpoint.is_some() && format_compatible;
+
+    BackendProbe {
+        backend,
+        key: backend.key(),
+        label: backend.label(),
+        vendor: backend.vendor(),
+        installed,
+        ready,
+        render_endpoint: render_endpoint.map(|endpoint| endpoint.name),
+        capture_endpoint: capture_endpoint.map(|endpoint| endpoint.name),
+        render_responding,
+        capture_responding,
+        format_compatible,
+        message: if ready {
+            format!(
+                "{} odpowiada — oba endpointy udostępniają prawidłowy format audio.",
+                backend.label()
+            )
+        } else {
+            backend.missing_message().to_string()
+        },
+        package_available: match backend {
+            VirtualAudioBackend::MicDeckVad => custom_driver_package_ready(),
+            VirtualAudioBackend::VbCable => true,
+        },
+    }
+}
+
+pub fn probe_all() -> Vec<BackendProbe> {
+    VirtualAudioBackend::ALL.into_iter().map(probe).collect()
+}
+
+/// The backend the app should use right now: the preferred one when it is ready,
+/// otherwise any other backend that is actually working.
+pub fn resolve_active_backend(preferred: VirtualAudioBackend) -> VirtualAudioBackend {
+    if driver_is_ready(preferred) {
+        return preferred;
+    }
+    VirtualAudioBackend::ALL
+        .into_iter()
+        .find(|candidate| *candidate != preferred && driver_is_ready(*candidate))
+        .unwrap_or(preferred)
+}
+
 pub fn bootstrap_driver() -> DriverBootstrap {
     // Startup is detection-only. Driver installation is an explicit user
     // action because it elevates privileges and may require a Windows restart.
     DriverBootstrap::default()
 }
 
-pub fn install_driver_now() -> DriverBootstrap {
-    if driver_is_ready() {
+pub fn install_driver_now(backend: VirtualAudioBackend) -> DriverBootstrap {
+    if driver_is_ready(backend) {
         return DriverBootstrap::default();
     }
 
@@ -92,13 +284,17 @@ pub fn install_driver_now() -> DriverBootstrap {
         ..DriverBootstrap::default()
     };
 
-    if let Err(error) = install_official_driver() {
+    let outcome = match backend {
+        VirtualAudioBackend::VbCable => install_official_driver(),
+        VirtualAudioBackend::MicDeckVad => install_micdeck_vad(),
+    };
+    if let Err(error) = outcome {
         status.error = Some(error);
         return status;
     }
 
-    for _ in 0..20 {
-        if driver_is_ready() {
+    for _ in 0..40 {
+        if driver_is_ready(backend) {
             return status;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -107,6 +303,23 @@ pub fn install_driver_now() -> DriverBootstrap {
     status.restart_required = true;
     status
 }
+
+pub fn uninstall_micdeck_vad() -> Result<(), String> {
+    verify_micdeck_vad_package()?;
+    let staged = stage_micdeck_vad_package()?;
+    let helper = staged.path().join("micdeck-driver-helper.exe");
+    let exit_code = run_elevated(&helper, "uninstall", staged.path(), false)?;
+    if exit_code != 0 {
+        return Err(format!(
+            "Deinstalacja MicDeck VAD zakończyła się kodem {exit_code}"
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// VB-CABLE (fallback backend)
+// ---------------------------------------------------------------------------
 
 fn verify_embedded_driver() -> Result<(), String> {
     let actual = format!("{:X}", Sha256::digest(DRIVER_ARCHIVE));
@@ -133,9 +346,7 @@ fn install_official_driver() -> Result<(), String> {
     };
     let setup_path = temp.path().join(setup_name);
     if !setup_path.is_file() {
-        return Err(format!(
-            "Brak oficjalnego instalatora {setup_name} w paczce"
-        ));
+        return Err(format!("Brak oficjalnego instalatora {setup_name} w paczce"));
     }
 
     let exit_code = run_elevated(&setup_path, "-i -h", temp.path(), false)?;
@@ -178,6 +389,122 @@ fn extract_driver_archive(temp: &TempDir) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// MicDeck VAD (own kernel-mode WaveRT driver)
+// ---------------------------------------------------------------------------
+
+pub fn custom_driver_package_ready() -> bool {
+    MICDECK_VAD_PACKAGE_READY == "1"
+        && !MICDECK_VAD_SYS.is_empty()
+        && !MICDECK_VAD_INF.is_empty()
+        && !MICDECK_VAD_CAT.is_empty()
+        && !MICDECK_VAD_MANIFEST.is_empty()
+        && !MICDECK_VAD_HELPER.is_empty()
+}
+
+pub fn custom_driver_package_version() -> Option<String> {
+    if !custom_driver_package_ready() {
+        return None;
+    }
+    parse_micdeck_vad_manifest()
+        .ok()
+        .map(|manifest| manifest.version)
+}
+
+fn embedded_driver_file(name: &str) -> Option<&'static [u8]> {
+    match name {
+        "MicDeckVad.sys" => Some(MICDECK_VAD_SYS),
+        "MicDeckVad.inf" => Some(MICDECK_VAD_INF),
+        "MicDeckVad.cat" => Some(MICDECK_VAD_CAT),
+        _ => None,
+    }
+}
+
+fn parse_micdeck_vad_manifest() -> Result<DriverPackageManifest, String> {
+    let bytes = MICDECK_VAD_MANIFEST
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(MICDECK_VAD_MANIFEST);
+    serde_json::from_slice(bytes)
+        .map_err(|error| format!("Nieprawidłowy manifest MicDeck VAD: {error}"))
+}
+
+fn verify_micdeck_vad_package() -> Result<(), String> {
+    if !custom_driver_package_ready() {
+        return Err(
+            "Ta kompilacja nie zawiera podpisanego pakietu MicDeck VAD. Zbuduj sterownik \
+             (scripts/build-micdeck-vad-and-app.ps1) albo użyj backendu VB-CABLE."
+                .into(),
+        );
+    }
+    let manifest = parse_micdeck_vad_manifest()?;
+    if manifest.abi != MICDECK_VAD_ABI || manifest.version.trim().is_empty() {
+        return Err("Manifest MicDeck VAD ma nieobsługiwaną wersję lub ABI.".into());
+    }
+    for required in ["MicDeckVad.sys", "MicDeckVad.inf", "MicDeckVad.cat"] {
+        let entry = manifest
+            .files
+            .iter()
+            .find(|file| file.name == required)
+            .ok_or_else(|| format!("Manifest MicDeck VAD nie zawiera {required}"))?;
+        let bytes = embedded_driver_file(required).expect("required embedded driver file");
+        let actual = format!("{:x}", Sha256::digest(bytes));
+        if !actual.eq_ignore_ascii_case(entry.sha256.trim()) {
+            return Err(format!("Niezgodny SHA-256 pakietu MicDeck VAD dla {required}"));
+        }
+    }
+    if manifest
+        .files
+        .iter()
+        .any(|file| embedded_driver_file(&file.name).is_none())
+    {
+        return Err("Manifest MicDeck VAD zawiera niedozwolony plik.".into());
+    }
+    Ok(())
+}
+
+fn write_verified(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = File::create(path)
+        .map_err(|error| format!("Nie udało się utworzyć {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("Nie udało się zapisać {}: {error}", path.display()))
+}
+
+fn stage_micdeck_vad_package() -> Result<TempDir, String> {
+    let temporary = tempfile::Builder::new()
+        .prefix("micdeck-vad-")
+        .tempdir()
+        .map_err(|error| format!("Nie udało się utworzyć katalogu tymczasowego: {error}"))?;
+    for (name, bytes) in [
+        ("MicDeckVad.sys", MICDECK_VAD_SYS),
+        ("MicDeckVad.inf", MICDECK_VAD_INF),
+        ("MicDeckVad.cat", MICDECK_VAD_CAT),
+        ("driver-manifest.json", MICDECK_VAD_MANIFEST),
+        ("micdeck-driver-helper.exe", MICDECK_VAD_HELPER),
+    ] {
+        write_verified(&temporary.path().join(name), bytes)?;
+    }
+    Ok(temporary)
+}
+
+fn install_micdeck_vad() -> Result<(), String> {
+    verify_micdeck_vad_package()?;
+    let staged = stage_micdeck_vad_package()?;
+    let helper = staged.path().join("micdeck-driver-helper.exe");
+    let parameters = format!("install \"{}\"", staged.path().display());
+    let exit_code = run_elevated(&helper, &parameters, staged.path(), false)?;
+    if exit_code != 0 {
+        return Err(format!(
+            "Instalator MicDeck VAD zakończył się kodem {exit_code}"
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint rename (shared by both backends)
+// ---------------------------------------------------------------------------
 
 pub fn rename_endpoint_elevated(raw_endpoint_id: &str, name: &str) -> Result<(), String> {
     let name = validate_endpoint_name(name)?;
@@ -377,5 +704,30 @@ mod tests {
             validate_endpoint_name("  MicDeck Virtual Mic  ").unwrap(),
             "MicDeck Virtual Mic"
         );
+    }
+
+    #[test]
+    fn backend_serialization_matches_frontend_contract() {
+        assert_eq!(
+            serde_json::to_string(&VirtualAudioBackend::VbCable).unwrap(),
+            "\"vbCable\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VirtualAudioBackend::MicDeckVad).unwrap(),
+            "\"micDeckVad\""
+        );
+        for backend in VirtualAudioBackend::ALL {
+            assert_eq!(
+                serde_json::to_string(&backend).unwrap(),
+                format!("\"{}\"", backend.key())
+            );
+        }
+    }
+
+    #[test]
+    fn staged_custom_package_is_cryptographically_verified() {
+        if custom_driver_package_ready() {
+            verify_micdeck_vad_package().expect("staged MicDeck VAD package must verify");
+        }
     }
 }

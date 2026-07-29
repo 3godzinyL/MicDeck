@@ -1,12 +1,15 @@
+pub mod loudness;
 pub mod native_audio;
 pub mod virtual_audio;
 
 use cpal::traits::{DeviceTrait, HostTrait};
+use rodio::source::UniformSourceIterator;
 use rodio::{Decoder, Source};
 use serde::{Deserialize, Serialize};
 use std::f32;
 use std::fs::{self, File};
 use std::io::{BufReader, Write};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -32,6 +35,12 @@ struct SoundItem {
     meter_profile: Vec<u8>,
     #[serde(default)]
     shortcut: Option<String>,
+    /// Gated integrated loudness from the BS.1770 analysis. `None` for clips imported
+    /// before loudness matching existed — the Levels tab can backfill them.
+    #[serde(default)]
+    loudness_lufs: Option<f32>,
+    #[serde(default)]
+    peak_dbfs: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,6 +58,17 @@ struct SoundDto {
     #[serde(rename = "sourceKind")]
     source_kind: String,
     shortcut: Option<String>,
+    #[serde(rename = "loudnessLufs")]
+    loudness_lufs: Option<f32>,
+    #[serde(rename = "peakDbfs")]
+    peak_dbfs: Option<f32>,
+    /// Gain the normaliser will apply to this clip with the current settings.
+    #[serde(rename = "normalizationGainDb")]
+    normalization_gain_db: f32,
+    /// True when the requested gain had to be clipped by the ceiling or the gain limits,
+    /// i.e. the clip cannot fully reach the target.
+    #[serde(rename = "normalizationLimited")]
+    normalization_limited: bool,
 }
 
 #[derive(Debug)]
@@ -59,6 +79,97 @@ struct PreparedSound {
     file_size: u64,
     duration_ms: u64,
     meter_profile: Vec<u8>,
+    loudness_lufs: f32,
+    peak_dbfs: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum NormalizationMode {
+    /// BS.1770 gated loudness — matches perceived level, which is what "same volume" means.
+    #[default]
+    Integrated,
+    /// Aligns sample peaks instead. Preserves dynamics but leaves clips perceptually uneven.
+    Peak,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NormalizationSettings {
+    enabled: bool,
+    mode: NormalizationMode,
+    /// Target for the integrated mode, in LUFS.
+    target_lufs: f32,
+    /// Target for the peak mode, and the ceiling that caps integrated gain, in dBFS.
+    peak_ceiling_db: f32,
+    /// Positive magnitudes; how far the normaliser may push a clip in either direction.
+    max_gain_db: f32,
+    max_attenuation_db: f32,
+    /// Drives the microphone auto-leveller to the same target so voice and clips land
+    /// at one level on the stream bus.
+    match_microphone: bool,
+}
+
+impl Default for NormalizationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: NormalizationMode::Integrated,
+            target_lufs: -16.0,
+            peak_ceiling_db: -1.0,
+            max_gain_db: 12.0,
+            max_attenuation_db: 24.0,
+            match_microphone: false,
+        }
+    }
+}
+
+impl NormalizationSettings {
+    fn sanitized(self) -> Self {
+        let defaults = Self::default();
+        Self {
+            target_lufs: finite_or(self.target_lufs, defaults.target_lufs).clamp(-40.0, -5.0),
+            peak_ceiling_db: finite_or(self.peak_ceiling_db, defaults.peak_ceiling_db)
+                .clamp(-12.0, 0.0),
+            max_gain_db: finite_or(self.max_gain_db, defaults.max_gain_db).clamp(0.0, 24.0),
+            max_attenuation_db: finite_or(self.max_attenuation_db, defaults.max_attenuation_db)
+                .clamp(0.0, 40.0),
+            ..self
+        }
+    }
+
+    /// Gain in dB for a clip, or `None` when the clip has never been analysed.
+    fn gain_db_for(&self, loudness_lufs: Option<f32>, peak_dbfs: Option<f32>) -> Option<f32> {
+        if !self.enabled {
+            return Some(0.0);
+        }
+        let peak = peak_dbfs?;
+        let desired = match self.mode {
+            NormalizationMode::Integrated => {
+                let loudness = loudness_lufs?;
+                if loudness <= loudness::SILENCE_LUFS {
+                    return Some(0.0);
+                }
+                self.target_lufs - loudness
+            }
+            NormalizationMode::Peak => self.peak_ceiling_db - peak,
+        };
+
+        // Never let the boost push samples past the ceiling; that is what the ceiling is for.
+        let headroom = self.peak_ceiling_db - peak;
+        Some(
+            desired
+                .min(headroom.max(-self.max_attenuation_db))
+                .clamp(-self.max_attenuation_db, self.max_gain_db),
+        )
+    }
+
+    fn linear_gain_for(&self, loudness_lufs: Option<f32>, peak_dbfs: Option<f32>) -> f32 {
+        match self.gain_db_for(loudness_lufs, peak_dbfs) {
+            Some(db) => db_to_linear(db),
+            None => 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,6 +363,20 @@ struct VirtualAudioStatusDto {
     microphone_device_id: Option<String>,
     #[serde(rename = "microphoneName")]
     microphone_name: Option<String>,
+    /// Backend the user picked in the driver tab.
+    #[serde(rename = "preferredBackend")]
+    preferred_backend: virtual_audio::VirtualAudioBackend,
+    /// Backend actually carrying audio right now — differs from the preferred one
+    /// while a freshly selected driver is still installing.
+    #[serde(rename = "activeBackend")]
+    active_backend: virtual_audio::VirtualAudioBackend,
+    #[serde(rename = "activeBackendLabel")]
+    active_backend_label: &'static str,
+    #[serde(rename = "customDriverAvailable")]
+    custom_driver_available: bool,
+    #[serde(rename = "customDriverVersion")]
+    custom_driver_version: Option<String>,
+    backends: Vec<virtual_audio::BackendProbe>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -277,6 +402,10 @@ struct PersistedState {
     virtual_render_device: Option<String>,
     #[serde(default)]
     virtual_capture_device: Option<String>,
+    #[serde(default)]
+    virtual_audio_backend: virtual_audio::VirtualAudioBackend,
+    #[serde(default)]
+    normalization: NormalizationSettings,
 }
 
 struct ActivePlayback {
@@ -285,6 +414,7 @@ struct ActivePlayback {
     duration_ms: u64,
     started_at: Instant,
     meter_profile: Vec<u8>,
+    normalization_gain: f32,
 }
 
 struct AppState {
@@ -302,6 +432,8 @@ struct AppState {
     playback: Option<ActivePlayback>,
     virtual_render_device: Option<String>,
     virtual_capture_device: Option<String>,
+    virtual_audio_backend: virtual_audio::VirtualAudioBackend,
+    normalization: NormalizationSettings,
 }
 
 #[derive(Default)]
@@ -373,6 +505,14 @@ impl AppState {
             virtual_capture_device: persisted
                 .as_ref()
                 .and_then(|p| p.virtual_capture_device.clone()),
+            virtual_audio_backend: persisted
+                .as_ref()
+                .map(|p| p.virtual_audio_backend)
+                .unwrap_or_default(),
+            normalization: persisted
+                .as_ref()
+                .map(|p| p.normalization.sanitized())
+                .unwrap_or_default(),
         }
     }
 
@@ -390,6 +530,8 @@ impl AppState {
             voice_processing: self.voice_processing,
             virtual_render_device: self.virtual_render_device.clone(),
             virtual_capture_device: self.virtual_capture_device.clone(),
+            virtual_audio_backend: self.virtual_audio_backend,
+            normalization: self.normalization,
         };
 
         let path = config_file_path()?;
@@ -419,6 +561,22 @@ impl AppState {
         (self.volume * self.sound_overdrive).clamp(0.0, 24.0)
     }
 
+    /// Voice DSP as the engine should see it. When loudness matching is asked to cover the
+    /// microphone too, the auto-leveller target is pulled onto the same LUFS target so
+    /// speech and clips arrive at the listener at one level.
+    fn effective_voice_processing(&self) -> VoiceProcessingSettings {
+        if !(self.normalization.enabled && self.normalization.match_microphone) {
+            return self.voice_processing;
+        }
+        VoiceProcessingSettings {
+            auto_level_enabled: true,
+            target_min_db: self.normalization.target_lufs - 1.5,
+            target_max_db: self.normalization.target_lufs + 1.5,
+            ..self.voice_processing
+        }
+        .sanitized()
+    }
+
     fn playback_status(&mut self) -> PlaybackStatusDto {
         if let Some(playback) = &self.playback {
             let elapsed = playback.started_at.elapsed().as_millis() as u64;
@@ -435,8 +593,9 @@ impl AppState {
             } else {
                 (position_ms as f32 / playback.duration_ms as f32).clamp(0.0, 1.0)
             };
-            let signal_level_01 =
-                level_for_position(&playback.meter_profile, position_ms) * self.volume;
+            let signal_level_01 = level_for_position(&playback.meter_profile, position_ms)
+                * self.volume
+                * playback.normalization_gain;
             let signal_dbfs = dbfs_from_level(signal_level_01);
 
             PlaybackStatusDto {
@@ -547,6 +706,18 @@ fn clamp_db(value: f32, fallback: f32) -> f32 {
     }
 }
 
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn db_to_linear(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+
 fn file_name_for_path(path: &Path) -> String {
     path.file_name()
         .and_then(|x| x.to_str())
@@ -600,53 +771,100 @@ fn level_for_position(profile: &[u8], position_ms: u64) -> f32 {
     profile[chunk_index] as f32 / 255.0
 }
 
-fn analyze_audio_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
+#[derive(Debug, Clone)]
+struct AudioAnalysis {
+    duration_ms: u64,
+    meter_profile: Vec<u8>,
+    loudness_lufs: f32,
+    peak_dbfs: f32,
+}
+
+/// Analysis rate and channel count. Matching what `play_file` feeds the engine keeps the
+/// measured loudness identical to what actually reaches the virtual cable.
+const ANALYSIS_SAMPLE_RATE: u32 = 48_000;
+const ANALYSIS_CHANNELS: usize = 2;
+
+fn analyze_audio_file(path: &Path) -> Result<AudioAnalysis, String> {
     let file =
         File::open(path).map_err(|e| format!("Nie udało się otworzyć pliku do analizy: {e}"))?;
     let decoder = Decoder::try_from(BufReader::new(file))
         .map_err(|e| format!("Nie udało się zdekodować pliku: {e}"))?;
 
-    let channels = usize::from(decoder.channels().get().max(1));
-    let sample_rate = decoder.sample_rate().get().max(1) as usize;
-    let samples_per_chunk = ((sample_rate * channels) / 10).max(channels);
     let total_duration = decoder.total_duration().map(|d| d.as_millis() as u64);
+    let source = UniformSourceIterator::new(
+        decoder,
+        NonZero::new(ANALYSIS_CHANNELS as u16).unwrap(),
+        NonZero::new(ANALYSIS_SAMPLE_RATE).unwrap(),
+    );
 
+    let frames_per_chunk = ANALYSIS_SAMPLE_RATE as usize / 10;
+    let mut analyzer = loudness::LoudnessAnalyzer::new(ANALYSIS_CHANNELS, ANALYSIS_SAMPLE_RATE);
     let mut meter_profile = Vec::new();
+    let mut frame = [0.0f32; ANALYSIS_CHANNELS];
+    let mut frame_len = 0usize;
     let mut sum_sq = 0.0f64;
-    let mut count = 0usize;
-    let mut total_samples = 0usize;
+    let mut chunk_frames = 0usize;
+    let mut total_frames = 0usize;
 
-    for sample in decoder {
-        let s = sample.abs().min(1.25) as f64;
-        sum_sq += s * s;
-        count += 1;
-        total_samples += 1;
+    for sample in source {
+        frame[frame_len] = sample;
+        frame_len += 1;
+        if frame_len < ANALYSIS_CHANNELS {
+            continue;
+        }
+        frame_len = 0;
+        analyzer.push_frame(&frame);
+        total_frames += 1;
 
-        if count >= samples_per_chunk {
-            let rms = (sum_sq / count as f64).sqrt().clamp(0.0, 1.0);
-            meter_profile.push((rms * 255.0).round() as u8);
+        let magnitude = frame
+            .iter()
+            .map(|value| f64::from(value.abs().min(1.25)))
+            .fold(0.0f64, f64::max);
+        sum_sq += magnitude * magnitude;
+        chunk_frames += 1;
+
+        if chunk_frames >= frames_per_chunk {
+            meter_profile.push(rms_to_meter(sum_sq, chunk_frames));
             sum_sq = 0.0;
-            count = 0;
+            chunk_frames = 0;
         }
     }
 
-    if count > 0 {
-        let rms = (sum_sq / count as f64).sqrt().clamp(0.0, 1.0);
-        meter_profile.push((rms * 255.0).round() as u8);
+    if chunk_frames > 0 {
+        meter_profile.push(rms_to_meter(sum_sq, chunk_frames));
     }
 
+    let measurement = analyzer.finish();
     let duration_ms = total_duration.unwrap_or_else(|| {
-        ((total_samples as f64 / (sample_rate * channels) as f64) * 1000.0).round() as u64
+        ((total_frames as f64 / f64::from(ANALYSIS_SAMPLE_RATE)) * 1000.0).round() as u64
     });
 
-    Ok((duration_ms, meter_profile))
+    Ok(AudioAnalysis {
+        duration_ms,
+        meter_profile,
+        loudness_lufs: measurement.integrated_lufs,
+        peak_dbfs: measurement.peak_dbfs,
+    })
 }
 
-fn to_sound_dto(item: &SoundItem) -> SoundDto {
+fn rms_to_meter(sum_sq: f64, frames: usize) -> u8 {
+    let rms = (sum_sq / frames.max(1) as f64).sqrt().clamp(0.0, 1.0);
+    (rms * 255.0).round() as u8
+}
+
+fn to_sound_dto(item: &SoundItem, normalization: &NormalizationSettings) -> SoundDto {
     let source_kind = if item.path.contains("micdeck") || item.path.contains("soundboard-binder") {
         "library"
     } else {
         "file"
+    };
+    let gain_db = normalization.gain_db_for(item.loudness_lufs, item.peak_dbfs);
+    let unclamped = match (normalization.enabled, item.loudness_lufs, item.peak_dbfs) {
+        (true, Some(loudness), Some(peak)) => Some(match normalization.mode {
+            NormalizationMode::Integrated => normalization.target_lufs - loudness,
+            NormalizationMode::Peak => normalization.peak_ceiling_db - peak,
+        }),
+        _ => None,
     };
 
     SoundDto {
@@ -660,7 +878,21 @@ fn to_sound_dto(item: &SoundItem) -> SoundDto {
         duration_text: format_duration(item.duration_ms),
         source_kind: source_kind.to_string(),
         shortcut: item.shortcut.clone(),
+        loudness_lufs: item.loudness_lufs,
+        peak_dbfs: item.peak_dbfs,
+        normalization_gain_db: gain_db.unwrap_or(0.0),
+        normalization_limited: match (gain_db, unclamped) {
+            (Some(applied), Some(wanted)) => (applied - wanted).abs() > 0.05,
+            _ => false,
+        },
     }
+}
+
+fn sound_dtos(app: &AppState) -> Vec<SoundDto> {
+    app.sounds
+        .iter()
+        .map(|item| to_sound_dto(item, &app.normalization))
+        .collect()
 }
 
 fn list_output_devices_impl() -> Result<Vec<DeviceDto>, String> {
@@ -680,7 +912,7 @@ fn list_output_devices_impl() -> Result<Vec<DeviceDto>, String> {
 
 fn list_input_devices_impl() -> Result<Vec<DeviceDto>, String> {
     let host = cpal::default_host();
-    let virtual_ids = virtual_audio::cable_capture_endpoints()
+    let virtual_ids = virtual_audio::managed_capture_endpoints()
         .into_iter()
         .flat_map(|endpoint| [endpoint.cpal_id, endpoint.raw_id])
         .collect::<Vec<_>>();
@@ -711,7 +943,9 @@ fn list_input_devices_impl() -> Result<Vec<DeviceDto>, String> {
             .iter()
             .any(|id| id == &dto.id || id == &dto.raw_id)
             || ((fingerprint.contains("vb-audio") || fingerprint.contains("vbaudio"))
-                && fingerprint.contains("cable"));
+                && fingerprint.contains("cable"))
+            || fingerprint.contains("micdeckvad")
+            || fingerprint.contains("micdeck virtual microphone");
         if !is_managed_virtual {
             let display_name = description
                 .as_ref()
@@ -789,12 +1023,13 @@ fn sync_virtual_audio_devices(
     Option<virtual_audio::AudioEndpoint>,
     Option<virtual_audio::AudioEndpoint>,
 ) {
+    let backend = virtual_audio::resolve_active_backend(app.virtual_audio_backend);
     let render = resolve_managed_endpoint(
-        virtual_audio::cable_render_endpoints(),
+        virtual_audio::render_endpoints(backend),
         app.virtual_render_device.as_deref(),
     );
     let capture = resolve_managed_endpoint(
-        virtual_audio::cable_capture_endpoints(),
+        virtual_audio::capture_endpoints(backend),
         app.virtual_capture_device.as_deref(),
     );
 
@@ -822,12 +1057,14 @@ fn get_virtual_audio_status(
     bootstrap: tauri::State<'_, Mutex<virtual_audio::DriverBootstrap>>,
 ) -> Result<VirtualAudioStatusDto, String> {
     let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+    let preferred = app.virtual_audio_backend;
     let (render, capture) = sync_virtual_audio_devices(&mut app);
     let bootstrap = bootstrap
         .lock()
         .map_err(|_| "Driver state lock error".to_string())?
         .clone();
     let ready = render.is_some() && capture.is_some();
+    let active = virtual_audio::resolve_active_backend(preferred);
 
     Ok(VirtualAudioStatusDto {
         installed: render.is_some() || capture.is_some(),
@@ -835,12 +1072,72 @@ fn get_virtual_audio_status(
         installer_attempted: bootstrap.installer_attempted,
         restart_required: bootstrap.restart_required || (bootstrap.installer_attempted && !ready),
         error: bootstrap.error,
-        vendor: "VB-Audio / VB-CABLE Pack45",
+        vendor: active.vendor(),
         render_device_id: render.as_ref().map(|endpoint| endpoint.cpal_id.clone()),
         render_device_name: render.map(|endpoint| endpoint.name),
         microphone_device_id: capture.as_ref().map(|endpoint| endpoint.cpal_id.clone()),
         microphone_name: capture.map(|endpoint| endpoint.name),
+        preferred_backend: preferred,
+        active_backend: active,
+        active_backend_label: active.label(),
+        custom_driver_available: virtual_audio::custom_driver_package_ready(),
+        custom_driver_version: virtual_audio::custom_driver_package_version(),
+        backends: virtual_audio::probe_all(),
     })
+}
+
+#[tauri::command]
+fn set_virtual_audio_backend(
+    backend: virtual_audio::VirtualAudioBackend,
+    state: tauri::State<'_, Mutex<AppState>>,
+    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+    if app.virtual_audio_backend == backend {
+        return Ok(());
+    }
+    app.virtual_audio_backend = backend;
+    // The endpoint ids belong to the previous backend, so drop them and let
+    // sync_virtual_audio_devices re-resolve against the new one.
+    app.virtual_render_device = None;
+    app.virtual_capture_device = None;
+    app.persist()?;
+
+    let mut native = native
+        .lock()
+        .map_err(|_| "Native audio lock error".to_string())?;
+    match configure_native_runtime(&mut app, &mut native) {
+        Ok(()) => Ok(()),
+        // Switching to a backend that is not installed yet is a normal step in the
+        // driver tab, so surface it as an error the UI shows without tearing down
+        // the saved preference.
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+fn test_virtual_audio_backend(
+    backend: virtual_audio::VirtualAudioBackend,
+) -> virtual_audio::BackendProbe {
+    virtual_audio::probe(backend)
+}
+
+#[tauri::command]
+fn uninstall_virtual_audio_driver(
+    state: tauri::State<'_, Mutex<AppState>>,
+    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
+) -> Result<(), String> {
+    virtual_audio::uninstall_micdeck_vad()?;
+    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+    app.virtual_audio_backend = virtual_audio::VirtualAudioBackend::VbCable;
+    app.virtual_render_device = None;
+    app.virtual_capture_device = None;
+    app.persist()?;
+    let mut native = native
+        .lock()
+        .map_err(|_| "Native audio lock error".to_string())?;
+    let _ = configure_native_runtime(&mut app, &mut native);
+    Ok(())
 }
 
 #[tauri::command]
@@ -862,11 +1159,30 @@ fn rename_virtual_microphone(
 
 #[tauri::command]
 fn install_virtual_audio_driver(
+    backend: Option<virtual_audio::VirtualAudioBackend>,
     bootstrap: tauri::State<'_, Mutex<virtual_audio::DriverBootstrap>>,
     state: tauri::State<'_, Mutex<AppState>>,
     native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
 ) -> Result<(), String> {
-    let result = virtual_audio::install_driver_now();
+    let backend = match backend {
+        Some(backend) => {
+            let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+            if app.virtual_audio_backend != backend {
+                app.virtual_audio_backend = backend;
+                app.virtual_render_device = None;
+                app.virtual_capture_device = None;
+                app.persist()?;
+            }
+            backend
+        }
+        None => {
+            state
+                .lock()
+                .map_err(|_| "State lock error".to_string())?
+                .virtual_audio_backend
+        }
+    };
+    let result = virtual_audio::install_driver_now(backend);
     let error = result.error.clone();
     let mut bootstrap_state = bootstrap
         .lock()
@@ -892,14 +1208,19 @@ fn configure_native_runtime(
     let input = resolve_physical_input(app)?.ok_or_else(|| {
         "Nie znaleziono fizycznego mikrofonu. Podłącz mikrofon i odśwież.".to_string()
     })?;
+    let backend = virtual_audio::resolve_active_backend(app.virtual_audio_backend);
     let (render, capture) = sync_virtual_audio_devices(app);
     let render = render.ok_or_else(|| {
-        "Wirtualne wyjście VB-CABLE nie jest jeszcze gotowe. Zainstaluj sterownik lub uruchom ponownie Windows."
-            .to_string()
+        format!(
+            "Wirtualne wyjście {} nie jest jeszcze gotowe. Zainstaluj sterownik w zakładce Sterownik albo uruchom ponownie Windows.",
+            backend.label()
+        )
     })?;
     let capture = capture.ok_or_else(|| {
-        "Wirtualny mikrofon VB-CABLE nie jest jeszcze gotowy. Uruchom ponownie Windows po instalacji sterownika."
-            .to_string()
+        format!(
+            "Wirtualny mikrofon {} nie jest jeszcze gotowy. Uruchom ponownie Windows po instalacji sterownika.",
+            backend.label()
+        )
     })?;
     let engine = runtime.engine.as_ref().ok_or_else(|| {
         runtime
@@ -915,7 +1236,7 @@ fn configure_native_runtime(
         sound_gain: app.effective_sound_gain(),
         system_audio_enabled: app.system_audio_enabled,
         system_audio_gain: app.system_audio_gain,
-        voice_processing: app.voice_processing.native(),
+        voice_processing: app.effective_voice_processing().native(),
     })?;
     engine.set_monitor_gain(app.monitor_gain);
     runtime.startup_error = None;
@@ -1125,9 +1446,130 @@ fn set_voice_processing_settings(
         .engine
         .as_ref()
     {
-        engine.set_voice_processing(app.voice_processing.native());
+        engine.set_voice_processing(app.effective_voice_processing().native());
     }
     Ok(app.voice_processing)
+}
+
+#[tauri::command]
+fn get_normalization_settings(
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<NormalizationSettings, String> {
+    let app = state.lock().map_err(|_| "State lock error".to_string())?;
+    Ok(app.normalization)
+}
+
+#[tauri::command]
+fn set_normalization_settings(
+    settings: NormalizationSettings,
+    state: tauri::State<'_, Mutex<AppState>>,
+    native: tauri::State<'_, Mutex<NativeAudioRuntime>>,
+) -> Result<NormalizationSettings, String> {
+    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+    app.normalization = settings.sanitized();
+    app.persist()?;
+
+    if let Some(engine) = native
+        .lock()
+        .map_err(|_| "Native audio lock error".to_string())?
+        .engine
+        .as_ref()
+    {
+        engine.set_voice_processing(app.effective_voice_processing().native());
+        // A clip already playing keeps the gain it started with; only the next one picks
+        // up the new target. Re-apply the bus gain so a settings change is not swallowed.
+        let playing_gain = app
+            .playback
+            .as_ref()
+            .map(|playback| playback.normalization_gain)
+            .unwrap_or(1.0);
+        engine.set_gains(
+            app.microphone_gain,
+            (app.effective_sound_gain() * playing_gain).clamp(0.0, 24.0),
+        );
+    }
+    Ok(app.normalization)
+}
+
+/// Measures every clip that has no BS.1770 result yet, or all of them when `force` is set.
+#[tauri::command]
+async fn analyze_library_loudness(
+    force: bool,
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<SoundDto>, String> {
+    let pending: Vec<(String, PathBuf)> = {
+        let state = app_handle.state::<Mutex<AppState>>();
+        let app = state.lock().map_err(|_| "State lock error".to_string())?;
+        app.sounds
+            .iter()
+            .filter(|sound| force || sound.loudness_lufs.is_none() || sound.peak_dbfs.is_none())
+            .map(|sound| (sound.id.clone(), PathBuf::from(&sound.path)))
+            .collect()
+    };
+
+    let total = pending.len();
+    if total == 0 {
+        let state = app_handle.state::<Mutex<AppState>>();
+        let app = state.lock().map_err(|_| "State lock error".to_string())?;
+        return Ok(sound_dtos(&app));
+    }
+
+    emit_library_progress(&app_handle, "loudness", "queued", 0, total, None);
+    let worker_handle = app_handle.clone();
+    let measured = tauri::async_runtime::spawn_blocking(move || {
+        pending
+            .into_iter()
+            .enumerate()
+            .map(|(index, (id, path))| {
+                emit_library_progress(
+                    &worker_handle,
+                    "loudness",
+                    "analyzing",
+                    index,
+                    total,
+                    Some(file_name_for_path(&path)),
+                );
+                let result = analyze_audio_file(&path);
+                emit_library_progress(
+                    &worker_handle,
+                    "loudness",
+                    "analyzing",
+                    index + 1,
+                    total,
+                    None,
+                );
+                (id, result)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| format!("Worker analizy głośności zakończył się błędem: {error}"))?;
+
+    let state = app_handle.state::<Mutex<AppState>>();
+    let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
+    let mut first_error = None;
+    for (id, result) in measured {
+        match result {
+            Ok(analysis) => {
+                if let Some(sound) = app.sounds.iter_mut().find(|sound| sound.id == id) {
+                    sound.duration_ms = analysis.duration_ms;
+                    sound.meter_profile = analysis.meter_profile;
+                    sound.loudness_lufs = Some(analysis.loudness_lufs);
+                    sound.peak_dbfs = Some(analysis.peak_dbfs);
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    app.persist()?;
+    emit_library_progress(&app_handle, "loudness", "done", total, total, None);
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(sound_dtos(&app)),
+    }
 }
 
 #[tauri::command]
@@ -1300,7 +1742,7 @@ fn prepare_sound_path(path: PathBuf) -> Result<PreparedSound, String> {
     }
 
     let normalized = path.to_string_lossy().to_string();
-    let (duration_ms, meter_profile) = analyze_audio_file(&path)?;
+    let analysis = analyze_audio_file(&path)?;
     let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
 
     Ok(PreparedSound {
@@ -1308,8 +1750,10 @@ fn prepare_sound_path(path: PathBuf) -> Result<PreparedSound, String> {
         path: normalized,
         extension: extension_for_path(&path),
         file_size,
-        duration_ms,
-        meter_profile,
+        duration_ms: analysis.duration_ms,
+        meter_profile: analysis.meter_profile,
+        loudness_lufs: analysis.loudness_lufs,
+        peak_dbfs: analysis.peak_dbfs,
     })
 }
 
@@ -1327,6 +1771,8 @@ fn insert_prepared_sound(app: &mut AppState, sound: PreparedSound) -> bool {
         duration_ms: sound.duration_ms,
         meter_profile: sound.meter_profile,
         shortcut: None,
+        loudness_lufs: Some(sound.loudness_lufs),
+        peak_dbfs: Some(sound.peak_dbfs),
     });
     app.next_id += 1;
     true
@@ -1434,7 +1880,7 @@ fn validate_media_url(url: &str) -> Result<(), String> {
 #[tauri::command]
 fn list_sounds(state: tauri::State<'_, Mutex<AppState>>) -> Result<Vec<SoundDto>, String> {
     let app = state.lock().map_err(|_| "State lock error".to_string())?;
-    Ok(app.sounds.iter().map(to_sound_dto).collect())
+    Ok(sound_dtos(&app))
 }
 
 #[tauri::command]
@@ -1446,7 +1892,7 @@ async fn add_sounds(
     if total == 0 {
         let state = app_handle.state::<Mutex<AppState>>();
         let app = state.lock().map_err(|_| "State lock error".to_string())?;
-        return Ok(app.sounds.iter().map(to_sound_dto).collect());
+        return Ok(sound_dtos(&app));
     }
 
     emit_library_progress(&app_handle, "files", "queued", 0, total, None);
@@ -1495,7 +1941,7 @@ async fn add_sounds(
         insert_prepared_sound(&mut app, sound);
     }
     app.persist()?;
-    let sounds = app.sounds.iter().map(to_sound_dto).collect();
+    let sounds = sound_dtos(&app);
     drop(app);
     emit_library_progress(&app_handle, "files", "complete", total, total, None);
     Ok(sounds)
@@ -1543,7 +1989,7 @@ async fn import_from_url(
     let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
     insert_prepared_sound(&mut app, prepared);
     app.persist()?;
-    let sounds = app.sounds.iter().map(to_sound_dto).collect();
+    let sounds = sound_dtos(&app);
     drop(app);
     emit_library_progress(&app_handle, "url", "complete", 1, 1, None);
     Ok(sounds)
@@ -1584,7 +2030,7 @@ fn set_sound_shortcut(
         .ok_or_else(|| "Nie znaleziono dźwięku".to_string())?;
     sound.shortcut = normalized;
     app.persist()?;
-    Ok(app.sounds.iter().map(to_sound_dto).collect())
+    Ok(sound_dtos(&app))
 }
 
 #[tauri::command]
@@ -1718,21 +2164,27 @@ async fn play_sound(id: String, app_handle: tauri::AppHandle) -> Result<(), Stri
             .ok_or_else(|| "Nie znaleziono dźwięku".to_string())?
     };
 
-    let needs_analysis = sound.duration_ms == 0 || sound.meter_profile.is_empty();
+    let needs_analysis = sound.duration_ms == 0
+        || sound.meter_profile.is_empty()
+        || sound.loudness_lufs.is_none()
+        || sound.peak_dbfs.is_none();
     if needs_analysis {
         let path = PathBuf::from(&sound.path);
-        let (duration_ms, meter_profile) =
-            tauri::async_runtime::spawn_blocking(move || analyze_audio_file(&path))
-                .await
-                .map_err(|error| format!("Worker analizy audio zakończył się błędem: {error}"))??;
-        sound.duration_ms = duration_ms;
-        sound.meter_profile = meter_profile;
+        let analysis = tauri::async_runtime::spawn_blocking(move || analyze_audio_file(&path))
+            .await
+            .map_err(|error| format!("Worker analizy audio zakończył się błędem: {error}"))??;
+        sound.duration_ms = analysis.duration_ms;
+        sound.meter_profile = analysis.meter_profile;
+        sound.loudness_lufs = Some(analysis.loudness_lufs);
+        sound.peak_dbfs = Some(analysis.peak_dbfs);
 
         let state = app_handle.state::<Mutex<AppState>>();
         let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
         if let Some(saved) = app.sounds.iter_mut().find(|saved| saved.id == id) {
             saved.duration_ms = sound.duration_ms;
             saved.meter_profile = sound.meter_profile.clone();
+            saved.loudness_lufs = sound.loudness_lufs;
+            saved.peak_dbfs = sound.peak_dbfs;
             let _ = app.persist();
         }
     }
@@ -1740,6 +2192,9 @@ async fn play_sound(id: String, app_handle: tauri::AppHandle) -> Result<(), Stri
     let state = app_handle.state::<Mutex<AppState>>();
     let mut app = state.lock().map_err(|_| "State lock error".to_string())?;
     app.playback = None;
+    let normalization_gain = app
+        .normalization
+        .linear_gain_for(sound.loudness_lufs, sound.peak_dbfs);
     let native = app_handle.state::<Mutex<NativeAudioRuntime>>();
     let native = native
         .lock()
@@ -1750,7 +2205,12 @@ async fn play_sound(id: String, app_handle: tauri::AppHandle) -> Result<(), Stri
             .clone()
             .unwrap_or_else(|| "C++ audio engine nie działa".into())
     })?;
-    engine.set_gains(app.microphone_gain, app.effective_sound_gain());
+    // Fold the per-clip normalisation into the sound bus gain so every clip lands on the
+    // stream at the same level without touching the engine ABI.
+    engine.set_gains(
+        app.microphone_gain,
+        (app.effective_sound_gain() * normalization_gain).clamp(0.0, 24.0),
+    );
     engine.play_file(Path::new(&sound.path))?;
 
     app.playback = Some(ActivePlayback {
@@ -1759,6 +2219,7 @@ async fn play_sound(id: String, app_handle: tauri::AppHandle) -> Result<(), Stri
         duration_ms: sound.duration_ms,
         started_at: Instant::now(),
         meter_profile: sound.meter_profile,
+        normalization_gain,
     });
 
     Ok(())
@@ -1802,6 +2263,9 @@ pub fn run() {
             list_input_devices,
             get_virtual_audio_status,
             install_virtual_audio_driver,
+            uninstall_virtual_audio_driver,
+            set_virtual_audio_backend,
+            test_virtual_audio_backend,
             rename_virtual_microphone,
             set_selected_device,
             get_selected_device,
@@ -1821,6 +2285,9 @@ pub fn run() {
             set_system_audio_gain,
             get_voice_processing_settings,
             set_voice_processing_settings,
+            get_normalization_settings,
+            set_normalization_settings,
+            analyze_library_loudness,
             get_native_audio_status,
             list_audio_sessions,
             set_audio_session_volume,
@@ -1940,6 +2407,72 @@ mod tests {
         assert_eq!(clamp_system_audio_gain(-2.0), 0.0);
         assert_eq!(clamp_system_audio_gain(0.85), 0.85);
         assert_eq!(clamp_system_audio_gain(8.0), 2.0);
+    }
+
+    #[test]
+    fn normalization_pulls_clips_onto_the_target_loudness() {
+        let settings = NormalizationSettings {
+            enabled: true,
+            ..NormalizationSettings::default()
+        };
+        // Quiet clip with plenty of headroom gets the full boost.
+        assert_eq!(settings.gain_db_for(Some(-24.0), Some(-12.0)), Some(8.0));
+        // Loud clip gets pulled down.
+        assert_eq!(settings.gain_db_for(Some(-10.0), Some(-1.0)), Some(-6.0));
+    }
+
+    #[test]
+    fn normalization_never_pushes_a_clip_past_the_peak_ceiling() {
+        let settings = NormalizationSettings {
+            enabled: true,
+            ..NormalizationSettings::default()
+        };
+        // Wants +14 dB to reach -16 LUFS, but the clip already peaks at -2 dBFS and the
+        // ceiling is -1 dBFS, so only +1 dB is available.
+        assert_eq!(settings.gain_db_for(Some(-30.0), Some(-2.0)), Some(1.0));
+    }
+
+    #[test]
+    fn normalization_respects_its_gain_limits() {
+        let settings = NormalizationSettings {
+            enabled: true,
+            max_gain_db: 6.0,
+            max_attenuation_db: 3.0,
+            ..NormalizationSettings::default()
+        };
+        assert_eq!(settings.gain_db_for(Some(-40.0), Some(-30.0)), Some(6.0));
+        assert_eq!(settings.gain_db_for(Some(-4.0), Some(-1.0)), Some(-3.0));
+    }
+
+    #[test]
+    fn unmeasured_clips_play_at_unity_instead_of_guessing() {
+        let settings = NormalizationSettings {
+            enabled: true,
+            ..NormalizationSettings::default()
+        };
+        assert_eq!(settings.gain_db_for(None, None), None);
+        assert_eq!(settings.linear_gain_for(None, None), 1.0);
+    }
+
+    #[test]
+    fn disabled_normalization_is_a_no_op() {
+        let settings = NormalizationSettings::default();
+        assert_eq!(settings.gain_db_for(Some(-40.0), Some(-30.0)), Some(0.0));
+    }
+
+    #[test]
+    fn microphone_matching_retargets_the_auto_leveller() {
+        let mut app = AppState::load();
+        app.normalization = NormalizationSettings {
+            enabled: true,
+            match_microphone: true,
+            target_lufs: -18.0,
+            ..NormalizationSettings::default()
+        };
+        let effective = app.effective_voice_processing();
+        assert!(effective.auto_level_enabled);
+        assert_eq!(effective.target_min_db, -19.5);
+        assert_eq!(effective.target_max_db, -16.5);
     }
 
     #[test]
