@@ -13,9 +13,10 @@
     "build:installer": "node scripts/tauri.mjs installer"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/api": "2.10.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
-    "@tauri-apps/plugin-dialog": "^2.4.1"
+    "@tauri-apps/plugin-dialog": "^2.4.1",
+    "@tauri-apps/plugin-global-shortcut": "^2.3.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.2",

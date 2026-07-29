@@ -28,3 +28,18 @@ MicDeck can call [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and
 [`FFmpeg`](https://ffmpeg.org/) when the user enables URL import. These tools
 are installed separately, are not linked into MicDeck, and retain their own
 licenses.
+
+## AEC3
+
+- Crate: [`aec3` 0.3.1](https://github.com/RubyBit/aec3-rs)
+- License: MIT OR BSD-3-Clause
+- Use: persistent 48 kHz acoustic echo cancellation in the microphone path
+
+## nnnoiseless / RNNoise
+
+- Crate: [`nnnoiseless` 0.5.2](https://github.com/jneem/nnnoiseless)
+- License: BSD-3-Clause
+- Use: persistent 48 kHz speech denoising and voice-probability estimation
+
+These DSP components are statically linked into MicDeck's native audio engine
+and retain their respective upstream copyright and license terms.

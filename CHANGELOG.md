@@ -7,11 +7,25 @@ All notable MicDeck changes are documented here. The project follows
 
 ### Planned
 
+- Authenticode/EV-signed MicDeck VAD package in the release pipeline
 - Hardware controller integrations
 - Signed builds and automatic updates
 
 ### Added
 
+- **MicDeck VAD**, an own kernel-mode WaveRT virtual audio driver, selectable from a new
+  Driver tab alongside VB-CABLE. The tab probes both backends, installs either one, tests
+  each endpoint independently, and reports the active backend when it differs from the
+  selected one instead of failing silently.
+- **Loudness matching** in a new Levels tab: a full ITU-R BS.1770-4 meter measures every
+  clip once (K-weighting derived from the analog prototype, 400 ms blocks with 75 % overlap,
+  absolute and relative gating), and the mix bus applies a per-clip gain so everything
+  leaves at the same perceived level. Peak ceiling and gain limits are respected, and the
+  same target can optionally drive the microphone auto-leveller.
+- Driver package staging in `build.rs`, with cryptographic verification of the embedded
+  MicDeck VAD package against its signed manifest before any elevated install.
+- Fast driver gates: `driver-syntax.cmd`, `driver-link.cmd` and `build-portable-tests.cmd`
+  compile, link, and unit-test the driver without needing the WDK MSBuild targets.
 - Dedicated bilingual Streamer console with pre/post-processing dBFS meters,
   configurable target range, live headphone calibration, and OBS output metering
 - Persistent WebRTC AEC3 and RNNoise processing followed by a smart gate,
@@ -31,6 +45,39 @@ All notable MicDeck changes are documented here. The project follows
 - Live import progress with immediate library refresh when prepared audio is ready
 - Organic cursor-following ambient glow, enabled by default
 - Built-in usage-rights reminder in Quick Capture
+
+### Fixed
+
+- **The virtual cable could go permanently silent.** Ring cursors were reset from the
+  control path while the capture DPC held a latched copy, leaving the read head ahead of the
+  write head. Flushes are now requested from the control path and applied by the consumer,
+  so the single-writer invariant holds; covered by a regression test.
+- **The driver did not build or link at all.** Missing `<stdunk.h>`, undeclared pool-tagged
+  `operator new`/`delete`, a non-existent `KSNAME_Wave`, const-qualified data-range tables,
+  a mismatched automation-table declaration, `PcRegisterPhysicalConnection` called with
+  strings instead of port objects, a missing `initguid.h` translation unit, and an absent
+  `stdunk.lib` all blocked compilation or linking.
+- **No audio format could ever be negotiated.** The streaming wave pins advertised
+  `SUBTYPE_ANALOG` / `SPECIFIER_NONE`, so KS never found an intersection and the data path
+  never ran. Host pins now publish PCM and IEEE-float `WAVEFORMATEX` ranges; the bridge pins
+  keep the analog range.
+- **The capture endpoint could never stream.** Capture wave and topology pin arrays were
+  ordered opposite to the pin-id enum used for the physical connections.
+- **Windows built no endpoints from the INF.** Interfaces were registered on `GLOBAL`
+  instead of the subdevice reference strings passed to `PcRegisterSubdevice`.
+- Advertised `KSDATAFORMAT` tables and the static cable/clock objects relied on dynamic
+  initialisers that never run in kernel mode; they are constant-initialised and `constinit`
+  now, so the compiler rejects any regression.
+- `IMiniportWaveRTStream::SetFormat` was unimplemented (leaving the stream class abstract)
+  and `IAdapterPowerManagement::PowerChangeState` had the wrong return type.
+- The non-paged ring leaked on driver unload and left a dangling pointer on shutdown.
+- The consumer primed on exactly one notification period, leaving no jitter margin.
+- Format intersection read `KSDATARANGE_AUDIO` fields out of ranges that may be a plain
+  `KSDATARANGE`, over-reading the client's buffer.
+- The endpoint reconnect worker never initialised COM, so every reconnect attempt failed,
+  and shutdown could block for over five seconds inside a backoff sleep.
+- Endpoint detection relied on the user-renameable friendly name; it now also matches the
+  device-interface name that comes straight from the INF.
 
 ### Changed
 

@@ -1,221 +1,342 @@
 <p align="center">
-  <img src="docs/social-preview.svg" alt="MicDeck — soundboard i dźwięk systemu w jednym wirtualnym mikrofonie" width="100%">
+  <img src="docs/social-preview.svg" alt="MicDeck — soundboard i dźwięk systemowy przez jeden wirtualny mikrofon" width="100%">
 </p>
 
 <h1 align="center">MicDeck</h1>
 
 <p align="center">
-  <strong>Natywny soundboard i router dźwięku systemowego dla Windows.</strong>
+  <strong>Konsoleta audio dla Windows — z własnym sterownikiem kernel-mode.</strong>
   <br>
-  Odpalaj klipy, udostępniaj to, co gra na komputerze, i wysyłaj cały miks przez jeden wirtualny mikrofon.
+  Odpalaj bindy, udostępniaj to, co gra na PC, wyrównaj wszystko do jednej głośności
+  <br>
+  i wypuść cały miks przez jeden wirtualny mikrofon.
 </p>
 
 <p align="center">
   <a href="README.md">English</a>
   ·
-  <a href="https://github.com/3godzinyL/MicDeck/releases/latest">Pobierz</a>
+  <a href="#dopasowanie-głośności">Normalizacja</a>
   ·
-  <a href="#jak-to-działa">Jak to działa</a>
+  <a href="#sterownik-micdeck-vad">Sterownik</a>
   ·
-  <a href="#obecny-zakres">Obecny zakres</a>
+  <a href="#ścieżka-sygnału">Ścieżka sygnału</a>
+  ·
+  <a href="#struktura-projektu">Struktura</a>
+  ·
+  <a href="#budowanie-ze-źródeł">Budowanie</a>
   ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml"><img alt="Status CI" src="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/3godzinyL/MicDeck/releases/latest"><img alt="Najnowsze wydanie" src="https://img.shields.io/github/v/release/3godzinyL/MicDeck?display_name=tag&style=flat-square&color=c8ff63&labelColor=0c0e11"></a>
+  <a href="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/3godzinyL/MicDeck/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Windows 10 i 11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0c0e11?style=flat-square&logo=windows&logoColor=c8ff63">
-  <a href="LICENSE"><img alt="Licencja MIT" src="https://img.shields.io/badge/license-MIT-0c0e11?style=flat-square&logoColor=c8ff63"></a>
+  <img alt="Rust i C++20" src="https://img.shields.io/badge/rdze%C5%84-Rust%20%2B%20C%2B%2B20-0c0e11?style=flat-square&logo=rust&logoColor=c8ff63">
+  <img alt="Sterownik WaveRT" src="https://img.shields.io/badge/sterownik-kernel%20WaveRT-0c0e11?style=flat-square&logoColor=c8ff63">
+  <img alt="ITU-R BS.1770-4" src="https://img.shields.io/badge/g%C5%82o%C5%9Bno%C5%9B%C4%87-ITU--R%20BS.1770--4-0c0e11?style=flat-square&logoColor=c8ff63">
+  <a href="LICENSE"><img alt="Licencja MIT" src="https://img.shields.io/badge/licencja-MIT-0c0e11?style=flat-square&logoColor=c8ff63"></a>
 </p>
 
 ---
 
-MicDeck łączy soundboard, przechwytywanie dźwięku systemu i routing do komunikatorów w jednej aplikacji. Prosty interfejs działa na Tauri i Rust, a krytyczną ścieżkę audio obsługuje osobny silnik C++/WASAPI.
+MicDeck to soundboard, przechwytywanie dźwięku Windows, broadcastowy leveler głośności i
+router wirtualnego mikrofonu w jednej aplikacji. Interfejs jest celowo mały; osobny natywny
+proces C++/WASAPI trzyma ścieżkę real-time, a wirtualny kabel zapewnia własny sterownik
+kernel-mode WaveRT.
 
-- **Konsola streamera:** mikrofon i dźwięk pulpitu są dopasowywane do jednego ustawianego zakresu dBFS przed wysłaniem miksu do OBS.
-- **Prywatne poziomy aplikacji:** przeglądarkę, Spotify lub grę można ściszyć tylko w kopii wysyłanej na wirtualny kabel, bez zmiany odsłuchu i głośności Windows.
-- **Produkcyjny tor głosu:** WebRTC AEC3, RNNoise, smart gate, adaptacyjne wyrównanie/kompresja i limiter działają w natywnym procesie audio.
-- **Szybki soundboard:** MP3, WAV, FLAC, OGG, AAC i M4A na czytelnym live decku.
-- **Globalny bind dla każdego dźwięku:** ustaw np. `Alt+P` i odpal klip nawet wtedy, gdy MicDeck jest schowany w trayu.
-- **Quick Capture:** wklej YouTube, Shorts albo TikTok i dodaj audio do biblioteki.
-- **Płynny import w tle:** pobieranie, dekodowanie i analiza waveformu nie blokują interfejsu.
-- **Jeden miks:** mikrofon, klipy i dźwięk pulpitu wychodzą jako `MicDeck Virtual Mic`.
-- **Adaptacyjne low latency:** `IAudioClient3` negocjuje okres dla konkretnego sprzętu zamiast stałego bufora 70 ms.
-- **Integracja z Windows:** autostart, uruchamianie w tle i stała ikona w zasobniku systemowym.
-- **Dwa języki:** cały interfejs przełącza się między polskim i angielskim z prawego górnego rogu.
-- **Local-first:** bez konta, telemetrii, chmury, wstrzykiwania DLL i hooków procesów.
+**Bez konta. Bez telemetrii. Bez chmury. Bez wstrzykiwania kodu i hooków w procesy.**
 
-### Tryb Streamer i obróbka głosu
+## W skrócie
 
-Osobna zakładka **Streamer** zmienia MicDeck w kontrolowany front-end
-transmisji, a nie tylko przełącznik dźwięku systemowego:
+| | |
+| --- | --- |
+| Platforma | Windows 10 2004+ / 11, x64 |
+| Wejścia | Mikrofon fizyczny, bindy, domyślne wyjście Windows (loopback) |
+| Wyjście | Jeden wirtualny mikrofon — **MicDeck VAD** (własny sterownik) albo VB-CABLE |
+| Głośność | Bramkowana głośność zintegrowana ITU-R BS.1770-4, gain per dźwięk, dopasowanie mikrofonu |
+| Rdzeń real-time | Osobny proces C++20 / WASAPI, 48 kHz float, okres notyfikacji ~10 ms |
+| Powłoka | Rust + Tauri 2, front w czystym JS (bez frameworka, bez dołączanego runtime) |
+| Języki | Polski i angielski, przełączane w locie |
 
-- ustawiasz środek oraz tolerancję docelowego zakresu dBFS dla głosu i pulpitu;
-- porównujesz na żywo poziomy mikrofonu i system audio przed oraz po obróbce;
-- kalibrujesz normalną mowę z regulowanym odsłuchem lokalnym w słuchawkach;
-- AEC3 i RNNoise działają przed gate'em, adaptacyjnym levelerem/kompresorem i limiterem;
-- poziomy pojedynczych aplikacji zmieniają tylko kopię dla OBS/wirtualnego kabla,
-  bez naruszania odsłuchu Windows;
-- pełny miks pulpitu pozostaje bezpiecznym fallbackiem, gdy prywatny loopback
-  procesu nie może wystartować.
+## Najważniejsze rzeczy
 
-> [!NOTE]
-> MicDeck jest obecnie publiczną wersją preview dla Windows 10/11 x64. Binariów jeszcze nie podpisano certyfikatem, dlatego Windows SmartScreen może pokazać ostrzeżenie. Pobieraj aplikację wyłącznie z tego repozytorium i sprawdzaj plik `SHA256SUMS.txt`.
+### Dopasowanie głośności
 
-## Wygląd aplikacji
+Każdy dźwięk jest raz mierzony pełną implementacją **ITU-R BS.1770-4** — filtry K-weighting
+wyprowadzane z prototypu analogowego (więc materiał 44,1 kHz nie jest źle ważony), bloki
+400 ms z 75 % nakładaniem i dwustopniowa bramka bezwzględna/względna. Zakładka Poziomy
+nakłada potem gain per dźwięk, żeby wszystko wychodziło na szynę miksu z tym samym
+odczuwanym poziomem — z ograniczeniem, które nigdy nie przepchnie sygnału ponad sufit szczytu.
+
+<p align="center">
+  <img src="docs/micdeck-levels.png" alt="Zakładka Poziomy: normalizacja BS.1770 sprowadza rozrzut 18,9 LU do 0,2 LU" width="100%">
+</p>
+
+> Biblioteka wyżej ma **18,9 LU** różnicy między najcichszym a najgłośniejszym dźwiękiem.
+> Z włączoną normalizacją rozrzut po gainie to **0,2 LU** — i o to w tej zakładce chodzi.
+
+Opcjonalnie ten sam cel steruje auto-levelerem mikrofonu, żeby mowa i bindy siedziały na
+jednym poziomie zamiast się przekrzykiwać.
+
+### Sterownik MicDeck VAD
+
+MicDeck ma własny sterownik **WaveRT** w trybie jądra zamiast zależności od firm trzecich.
+Zakładka Sterownik pozwala wybrać backend, zainstalować go i sprawdzić, czy oba endpointy
+faktycznie odpowiadają — z VB-CABLE utrzymanym jako działający fallback.
+
+<p align="center">
+  <img src="docs/micdeck-driver.png" alt="Zakładka Sterownik: MicDeck VAD i VB-CABLE obok siebie z diagnostyką endpointów" width="100%">
+</p>
+
+Zrzut pokazuje uczciwe zachowanie: MicDeck VAD jest wybranym backendem, ale ta kompilacja nie
+ma podpisanego pakietu, więc audio dalej płynie przez VB-CABLE, a interfejs mówi dokładnie
+dlaczego.
+
+### Reszta
+
+- **Soundboard** z globalnymi skrótami, podglądem waveformu i importem jednym kliknięciem.
+- **Quick Capture** — wklej link YouTube / Shorts / TikTok, dźwięk ląduje w bibliotece.
+- **Transmisja dźwięku systemowego** — Spotify, gra albo rozmowa w tym samym miksie.
+- **Głośność per aplikacja** — widok Studio listuje żywe sesje audio z własnymi suwakami.
+- **Łańcuch DSP głosu** — AEC3, RNNoise, bramka szumów, auto-leveler, kompresor, limiter.
+- **Siedzi w zasobniku**, umie autostart i nie wchodzi w drogę.
+
+## Interfejs
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/micdeck-library-en.png" alt="Biblioteka i Quick Capture w MicDeck"></td>
-    <td width="50%"><img src="docs/micdeck-studio-en.png" alt="Studio live i routing dźwięku w MicDeck"></td>
+    <td width="50%"><img src="docs/micdeck-library.png" alt="Biblioteka"></td>
+    <td width="50%"><img src="docs/micdeck-studio.png" alt="Studio live"></td>
   </tr>
   <tr>
-    <td align="center"><strong>Biblioteka</strong><br><sub>Pady, wyszukiwarka, sterowanie odtwarzaniem i pobieranie z URL.</sub></td>
-    <td align="center"><strong>Studio live</strong><br><sub>Mikrofon, system audio, mierniki, monitoring i status trasy.</sub></td>
+    <td align="center"><strong>Biblioteka</strong> — bindy, skróty, Quick Capture</td>
+    <td align="center"><strong>Studio</strong> — mikser live i transmisja systemu</td>
   </tr>
   <tr>
-    <td colspan="2"><img src="docs/micdeck-streamer-en.png" alt="Konsola Streamer w MicDeck z miernikami dBFS głosu i pulpitu, adaptacyjnym wyrównaniem, kalibracją live oraz sterowaniem wyjściem OBS"></td>
+    <td width="50%"><img src="docs/micdeck-streamer.png" alt="Streamer"></td>
+    <td width="50%"><img src="docs/micdeck-settings.png" alt="Ustawienia"></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><strong>Konsola Streamer</strong><br><sub>Mierniki przed i po DSP, zakres docelowy, kalibracja słuchawkowa, filtry mikrofonu oraz gain magistrali streamu.</sub></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/micdeck-filters-en.png" alt="Ustawienia filtrów audio MicDeck z AEC3, RNNoise, smart gate, kompresorem, limiterem i schematem kolejności obróbki"></td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><strong>Ustawienia filtrów audio</strong><br><sub>Trwałe ustawienia oczyszczania głosu, dynamiki, limitera bezpieczeństwa i jawna kolejność obróbki realtime.</sub></td>
+    <td align="center"><strong>Streamer</strong> — kalibracja i level match</td>
+    <td align="center"><strong>Ustawienia</strong> — silnik, integracja z Windows, poradniki</td>
   </tr>
 </table>
 
-## Pobieranie
+## Ścieżka sygnału
 
-Pobierz najnowsze pliki z [GitHub Releases](https://github.com/3godzinyL/MicDeck/releases/latest):
-
-| Plik | Zastosowanie |
-| --- | --- |
-| `MicDeck-Setup.exe` | Wersja zalecana, instalowana dla aktualnego użytkownika. |
-| `MicDeck-portable.exe` | Aplikacja bez instalacji; sterownik audio nadal może wymagać konfiguracji. |
-| `SHA256SUMS.txt` | Sumy SHA-256 obu plików wykonywalnych. |
-
-Sprawdzenie pobranego instalatora:
-
-```powershell
-Get-FileHash .\MicDeck-Setup.exe -Algorithm SHA256
+```
+ mikrofon ─────┐
+               │   ┌──────────────────────────────────────────────┐
+ bindy ────────┼──▶│  soundboard_audio_engine.exe  (C++20/WASAPI) │
+               │   │                                              │
+ loopback      │   │   AEC3 → RNNoise → bramka → leveler → limiter│
+ Windows ──────┘   │   + gain BS.1770 per dźwięk na szynie bindów │
+                   └───────────────────┬──────────────────────────┘
+                                       │  48 kHz float, ~10 ms
+                                       ▼
+                   ┌──────────────────────────────────────────────┐
+                   │  MicDeck VAD  (kernel WaveRT)  albo VB-CABLE │
+                   │  endpoint render ──▶ ring SPSC ──▶ capture   │
+                   └───────────────────┬──────────────────────────┘
+                                       ▼
+                        Discord / OBS / Teams / cokolwiek
 ```
 
-Porównaj wynik z odpowiednią linią w `SHA256SUMS.txt`.
+Proces Rust/Tauri nigdy nie dotyka ścieżki real-time. Dekoduje pliki, mierzy głośność,
+trzyma stan i gada z silnikiem przez most IPC na pamięci współdzielonej
+(`soundboard_ipc.dll`). Jak silnik padnie, UI żyje dalej i go restartuje.
 
-### Pierwsze uruchomienie
+## Sterownik MicDeck VAD
 
-1. Uruchom MicDeck.
-2. Otwórz **Ustawienia** i zainstaluj oficjalny sterownik VB-CABLE, jeśli aplikacja nie wykryła zgodnego wirtualnego urządzenia.
-3. Wybierz swój prawdziwy mikrofon.
-4. W Discordzie lub grze ustaw wejście **MicDeck Virtual Mic**.
-5. Dodaj klip albo przejdź do **Studio live** i włącz udostępnianie dźwięku systemu.
-6. Opcjonalnie ustaw globalne bindy i włącz **Uruchamiaj przy logowaniu**.
+`drivers/micdeck-vad` to kompletne wirtualne urządzenie audio PortCls/WaveRT: endpoint
+render („MicDeck Driver Input") i endpoint capture („MicDeck Virtual Microphone") połączone
+bezblokadowym ringiem w non-paged pool.
 
-Zamknięcie okna ukrywa MicDeck w zasobniku systemowym obok zegara i nie przerywa routingu. Pełne wyjście jest dostępne w menu ikony jako **Quit / Zakończ**.
+**Rzeczy warte uwagi w projekcie:**
 
-## Quick Capture
+- **Jeden pisarz na kursor.** Producent jest właścicielem `write_frame_`, konsument
+  `read_frame_` i nic innego nie może do nich pisać. Flush jest *zgłaszany* ze ścieżki
+  sterującej, a *wykonywany* przez konsumenta — bo zapis z wątku sterującego ścigający się z
+  DPC, który już wczytał kursor, zostawia głowicę odczytu przed zapisem, a endpoint milknie
+  wtedy na tyle, ile trwała sesja.
+- **Stan synchronizowany epoką.** Tryb latencji, aktywność producenta/konsumenta i
+  ponowne primowanie idą przez atomową epokę; maszyna stanów fade jest wyłącznie prywatna
+  dla konsumenta.
+- **Prime / fade / trim.** Konsument czeka na realny zapas na jitter zanim ruszy (więcej niż
+  jeden okres notyfikacji), wchodzi i wychodzi z nieciągłości fadem zamiast trzaskiem i
+  przycina zwietrzałe audio, gdy kolejka się wydłuża.
+- **Trzy tryby latencji** — UltraLow (prime 5 ms), Balanced (15 ms), Resilient (30 ms) —
+  przełączane w locie prywatnym property setem KS, razem ze statystykami ringu.
+- **Zero założeń o CRT.** Obiekty statyczne są `constinit`, a tablice formatów mają
+  inicjalizację stałą, więc dynamiczny inicjator, który w kernelu i tak by nie wystartował,
+  jest błędem kompilacji, a nie zagadką przy starcie systemu.
 
-Obsługiwane są adresy YouTube, YouTube Shorts, `youtu.be` i TikTok. Import wymaga `yt-dlp` oraz `ffmpeg` w `PATH`; skrypt `scripts\install-tools.bat` instaluje oba narzędzia lokalnie.
+Katalog `shared/` kompiluje się i do sterownika, i do binarki testowej w usermode, więc ring
+i pipeline są pokryte zwykłymi asercjami, które lecą w kilka sekund.
 
-Pobieraj i udostępniaj wyłącznie materiały, do których masz prawa. MicDeck nie omija zabezpieczeń platform i nie nadaje licencji do cudzych treści.
+> **Status wydania.** Sterownik kompiluje się i linkuje czysto, a jego logika ma testy —
+> włącznie z regresją na opisany wyżej wyścig flush. Zbudowanie instalowalnego `.sys`
+> wymaga dodatkowo WDK i certyfikatu do podpisu
+> (`scripts/build-micdeck-vad-and-app.ps1`). Kompilacje bez osadzonego podpisanego pakietu
+> raportują MicDeck VAD jako niedostępny i schodzą na VB-CABLE — bez cichej awarii.
 
-## Jak to działa
+## Struktura projektu
 
-```mermaid
-flowchart LR
-  mic["Fizyczny mikrofon"] --> capture["WASAPI capture"]
-  desktop["Dźwięk systemu"] --> loopback["Zbiorczy loopback / referencja AEC"]
-  apps["Aktywne aplikacje"] --> process["Prywatne loopbacki procesów"]
-  pads["Pady dźwiękowe"] --> ipc["Lock-free IPC"]
-  loopback --> dsp["AEC3 → RNNoise → gate → leveler"]
-  capture --> dsp
-  dsp --> mixer["Mikser C++ real-time + limiter"]
-  loopback --> desktopbus["Adaptacyjne wyrównanie pulpitu"]
-  process --> desktopbus
-  desktopbus --> mixer
-  ipc --> mixer
-  mixer --> cable["Zarządzany wirtualny kabel"]
-  cable --> chat["Discord · gry · OBS · rozmowy"]
+```
+micdeck/
+├── src/                              Front — czysty JS, bez frameworka
+│   ├── main.js                       Widoki, stan, wywołania IPC, zdarzenia
+│   ├── i18n.js                       Teksty PL + EN
+│   └── styles.css                    Cały system designu
+│
+├── src-tauri/                        Powłoka w Ruście
+│   ├── src/
+│   │   ├── lib.rs                    Stan aplikacji, komendy Tauri, tray, skróty
+│   │   ├── loudness.rs               Miernik ITU-R BS.1770-4 (K-weighting + bramka)
+│   │   ├── virtual_audio.rs          Wykrywanie backendów, instalacja, zmiana nazwy
+│   │   └── native_audio.rs           FFI do silnika C++, dekodowanie i push
+│   ├── build.rs                      Buduje silnik natywny, stage'uje pakiet sterownika
+│   ├── resources/
+│   │   ├── micdeck-vad/package/      Tu ląduje podpisany pakiet (poza gitem)
+│   │   └── vbcable/                  Oficjalne archiwum VB-CABLE + SHA-256
+│   └── tauri.conf.json
+│
+├── native-audio/                     Rdzeń audio real-time
+│   ├── engine/src/                   WASAPI capture/render, mikser, monitor sesji
+│   ├── bridge/                       Most IPC na pamięci współdzielonej
+│   ├── dsp/                          Biblioteka DSP w Ruście (AEC3, RNNoise, dynamika)
+│   ├── protocol/                     Wersjonowane struktury IPC
+│   └── selftest/                     Testy natywne niezależne od sprzętu
+│
+├── drivers/micdeck-vad/              Sterownik audio w trybie jądra
+│   ├── driver/src/
+│   │   ├── driver.cpp                DriverEntry, AddDevice, łańcuch unload
+│   │   ├── adapter.cpp               Rejestracja subdevice'ów + połączenia fizyczne
+│   │   ├── endpoint_descriptors.cpp  Tablice pinów / filtrów / zakresów danych
+│   │   ├── miniport_wave_rt*.cpp     Miniport WaveRT, strumień, transfer w DPC
+│   │   ├── miniport_topology.cpp     Miniport topologii
+│   │   ├── virtual_cable.cpp         Własność ringu, stan strumieni, statystyki
+│   │   ├── format.cpp                Tablica KSDATAFORMAT (inicjalizacja stała)
+│   │   ├── audio_clock.cpp           Zegar pozycji strumienia
+│   │   ├── master_clock.cpp          Wspólny zegar zakotwiczony w QPC
+│   │   ├── property_handlers.cpp     Prywatny property set KS (statystyki, latencja)
+│   │   ├── power_management.cpp      Przejścia D0/D3
+│   │   ├── guids.cpp                 Jedyna jednostka z initguid.h
+│   │   └── new_delete.cpp            operator new/delete z tagiem puli
+│   ├── shared/                       Kompiluje się i w kernelu, i w usermode
+│   │   ├── micdeck_audio_core.*      Ring SPSC, konwersja formatów, atomiki
+│   │   └── micdeck_cable_pipeline.*  Polityka prime / fade / trim
+│   ├── integration/
+│   │   ├── driver-helper/            Instalator SetupAPI/DIFx z podniesieniem uprawnień
+│   │   ├── micdeck-native/           Wykrywanie endpointów + kontroler reconnectu
+│   │   └── tauri-rust/               Referencyjne bindingi w Ruście
+│   ├── package/MicDeckVad.inf        INF (interfejsy rejestrowane per subdevice)
+│   ├── tests/                        Testy usermode dla kodu współdzielonego
+│   ├── tools/                        vadctl, tone-probe, e2e-certifier
+│   ├── scripts/                      Budowanie, podpis, instalacja, bramki certyfikacji
+│   └── docs/                         Architektura, bring-up, model bezpieczeństwa
+│
+├── scripts/                          Budowanie i pakowanie aplikacji
+│   ├── build-micdeck-vad-and-app.ps1 Sterownik + aplikacja za jednym razem
+│   ├── stage-micdeck-vad-package.ps1 Weryfikuje podpisy, pisze manifest
+│   └── tauri.mjs                     Cele portable / installer
+│
+└── docs/                             Zrzuty ekranu, release notes
 ```
 
-Warstwa Rust/Tauri odpowiada za UI, bibliotekę, zapis ustawień, pobieranie i cykl życia sterownika. Pobieranie, dekodowanie i analiza plików są wykonywane na workerach blokujących poza wątkiem UI, a biblioteka odświeża się dopiero po przygotowaniu metadanych. Osobny silnik C++20 realizuje event-driven capture, loopback, miksowanie, monitoring i render. Wersjonowany most pamięci współdzielonej trzyma pracę interfejsu z dala od wątku real-time.
+## Budowanie ze źródeł
 
-MicDeck pyta urządzenia o obsługiwane okresy shared mode i dobiera niski, stabilny okres blisko minimum sprzętu. Gdy `IAudioClient3` nie jest dostępne, używa bezpiecznego okresu domyślnego. Capture i render są sterowane zdarzeniami WASAPI, a wątki audio korzystają z MMCSS. Studio pokazuje wynegocjowaną konfigurację, szacowane opóźnienie i underruny zamiast obiecywać jedną wartość poprawną dla każdego sprzętu.
+### Wymagania
 
-## Obecny zakres
-
-Ta sekcja celowo opisuje granice wersji preview:
-
-| Obszar | Stan w v0.1 |
+| Komponent | Do czego |
 | --- | --- |
-| Przechwytywanie systemu | Zbiorczy loopback Windows pozostaje aktywny jako referencja AEC i bezpieczny fallback. Po zmianie poziomu aplikacji MicDeck tworzy prywatną magistralę loopbacków procesów i reguluje wyłącznie kopię wysyłaną na kabel. Głośność odsłuchu Windows nie jest zmieniana. |
-| Tryb WASAPI | Adaptacyjny shared mode; projekt nie deklaruje exclusive mode. |
-| Monitoring | Przy aktywnym udostępnianiu systemu lokalny odsłuch padów jest wyciszany, aby uniknąć pętli. Pady nadal trafiają do miksu wyjściowego. |
-| Zmiana urządzeń | Studio i Ustawienia pokazują stan oraz błędy silnika. Po zmianie konfiguracji dostępny jest ręczny restart silnika audio. |
-| Domyślny mikrofon | MicDeck nie nadpisuje już automatycznie domyślnego wejścia Windows. Ustawienia zawierają ręczną naprawę, która przywraca wybrany fizyczny mikrofon dla ról Console, Multimedia i Communications. |
-| DSP | Tor mikrofonu zawiera AEC3, RNNoise, opcjonalny smart gate, adaptacyjne dopasowanie zakresu/kompresję oraz limiter przy 48 kHz. Stan filtrów jest trwały, a przełączanie ma 150 ms crossfade. Brak hosta VST. |
-| Zgodność loopbacku procesów | Poziomy pojedynczych aplikacji wymagają Windows 10 build 20348 lub nowszego. Na starszym systemie albo po błędzie przechwytywania MicDeck zachowuje pełny miks zbiorczy, zamiast zgubić źródło. |
-| Dystrybucja | Buildy mają sumy kontrolne, ale nie mają jeszcze podpisu Authenticode ani automatycznych aktualizacji. |
-| Platformy | Windows x64. Brak deklarowanego wsparcia macOS, Linux, ARM64, Stream Deck i MIDI. |
+| Rust (stable, toolchain MSVC) | Powłoka aplikacji |
+| Node.js 20+ | Build frontu |
+| Visual Studio 2022 + „Desktop development with C++" | Silnik natywny i sterownik |
+| Windows SDK 10.0.22621+ | Nagłówki i biblioteki kernela |
+| Windows Driver Kit (WDK) | Zbudowanie instalowalnego `.sys` |
+| yt-dlp + ffmpeg w `PATH` | Quick Capture (opcjonalnie) |
 
-## Build ze źródeł
+### Uruchomienie
 
-Wymagania: Windows 10/11 x64, Node.js 24+, Rust stable MSVC, Visual Studio 2022 Build Tools z **Desktop development with C++** oraz WebView2 Runtime.
-
-```powershell
-npm ci
+```bash
+npm install
 npm run tauri dev
 ```
 
-Build produkcyjny:
+`build.rs` kompiluje po drodze silnik C++ i helper instalacyjny, więc pierwszy build trwa.
+Do tej ścieżki WDK nie jest potrzebne — aplikacja działa na VB-CABLE.
+
+### Wydanie
 
 ```powershell
-npm run build:portable
-npm run build:installer
+npm run build:portable                     # pojedynczy portable .exe
+npm run build:installer                    # instalator NSIS
+.\scripts\build-micdeck-vad-and-app.ps1    # sterownik + podpisany pakiet + aplikacja
 ```
 
-Testy:
+### Weryfikacja
 
-```powershell
-npm run build
-cargo test --manifest-path src-tauri\Cargo.toml --locked
+```bash
+# Rust: kalibracja BS.1770, limity normalizacji, integralność pakietu sterownika
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+# Logika sterownika: ring, regresja wyścigu flush, prime/fade/trim, konwersja formatów
+drivers\micdeck-vad\scripts\build-portable-tests.cmd
+
+# Sterownik kompiluje się czysto w trybie jądra
+drivers\micdeck-vad\scripts\driver-syntax.cmd
+
+# Sterownik linkuje się czysto — łapie nierozwiązane symbole i statyczne inicjatory
+drivers\micdeck-vad\scripts\driver-link.cmd
 ```
 
-## Roadmap
-
-- [ ] Przechwytywanie dźwięku z wybranej aplikacji
-- [ ] Normalizacja, limiter i lekki EQ
-- [ ] Wiele decków i profili
-- [ ] Stream Deck i MIDI
-- [ ] Podpisane buildy i automatyczne aktualizacje
-- [ ] Kolejne tłumaczenia społeczności
+Implementacja BS.1770 jest przypięta do punktu kalibracyjnego samej normy: sinus 1 kHz o
+poziomie 0 dBFS w jednym kanale pary stereo musi dać **−3,01 LKFS**. Jak współczynniki
+K-weighting albo offset −0,691 kiedykolwiek odjadą, ten test padnie.
 
 ## Prywatność i bezpieczeństwo
 
-- Mikrofon, pady i dźwięk systemu są przetwarzane lokalnie.
-- MicDeck nie ma kont, telemetrii, analytics ani chmurowej usługi audio.
-- Aplikacja nie wstrzykuje DLL i nie hookuje procesów innych programów.
-- Archiwum oficjalnego VB-CABLE jest przed rozpakowaniem porównywane z sumą SHA-256 zapisaną w kodzie.
-- Tymczasowe pliki instalatora sterownika są usuwane po jego zakończeniu.
+- Bez konta, bez telemetrii, bez połączeń sieciowych innych niż pobrania Quick Capture,
+  które sam uruchamiasz.
+- Osadzone archiwum VB-CABLE jest weryfikowane po SHA-256 zanim w ogóle zostanie rozpakowane.
+- Pakiet MicDeck VAD jest sprawdzany względem podpisanego manifestu przed instalacją, a
+  helper z podniesionymi uprawnieniami startuje wyłącznie ze świeżo przygotowanego katalogu
+  tymczasowego.
+- Instalacja sterownika to zawsze świadoma akcja użytkownika — start aplikacji tylko *wykrywa*.
+- Żadnych hooków w procesach, wstrzykiwania kodu ani przechwytywania cudzego audio.
 
-Aktualne pliki wykonywalne nie są podpisane. To jawne ograniczenie wersji preview i najważniejszy pozostały element utwardzenia dystrybucji.
+## Roadmapa
 
-Podejrzenia podatności zgłaszaj prywatnie według [SECURITY.md](SECURITY.md).
+- [ ] Pakiet MicDeck VAD podpisany Authenticode/EV w pipelinie wydań
+- [ ] Automatyczne odzyskiwanie po odłączeniu i podłączeniu urządzenia audio
+- [ ] Przechwytywanie per aplikacja (jedna apka zamiast całego pulpitu)
+- [ ] Wiele decków i profili
+- [ ] Sterowanie ze Stream Decka i MIDI
+- [ ] Kolejne tłumaczenia od społeczności
 
-## VB-CABLE, wkład i licencja
+## Oprogramowanie firm trzecich
 
-MicDeck zawiera oficjalny, niezmodyfikowany pakiet **VB-CABLE Driver Pack 45**. Jest to oddzielny produkt VB-Audio udostępniany w modelu donationware. Szczegóły atrybucji i warunków dystrybucji znajdują się w [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+VB-CABLE to donationware autorstwa VB-Audio, redystrybuowane bez modyfikacji na własnych
+warunkach (`src-tauri/resources/vbcable/NOTICE.md`). Jak z niego korzystasz, wspomóż autora —
+MicDeck VAD istnieje po to, żeby ta zależność była opcjonalna, a nie żeby nikt za nią nie
+zapłacił. Pełne atrybucje w [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Zasady zgłaszania zmian opisuje [CONTRIBUTING.md](CONTRIBUTING.md). Kod MicDeck jest dostępny na [licencji MIT](LICENSE), a zewnętrzne komponenty zachowują własne warunki.
+## Współpraca
+
+Issues i pull requesty mile widziane — zobacz [CONTRIBUTING.md](CONTRIBUTING.md) i
+[Kodeks postępowania](CODE_OF_CONDUCT.md). Cokolwiek dotykającego sterownika albo
+współdzielonego ringu powinno mieć test w `drivers/micdeck-vad/tests`. Zgłaszając problem z
+dźwiękiem, dorzuć status silnika, wersję Windows, nazwy urządzeń, wynegocjowaną latencję i
+licznik underrunów z zakładki Sterownik.
+
+## Licencja
+
+MIT — zobacz [LICENSE](LICENSE). Dołączone i opcjonalne komponenty firm trzecich zachowują
+własne licencje i warunki dystrybucji.
 
 ---
 
 <p align="center">
-  <strong>Jeśli MicDeck upraszcza Ci audio na Discordzie, zostaw gwiazdkę.</strong>
-  <br>
-  Dzięki temu projekt ma większą szansę dotrzeć do kolejnych osób.
+  <strong>Jeśli MicDeck ogarnia Ci audio na rozmowach, zostaw gwiazdkę.</strong>
 </p>

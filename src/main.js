@@ -78,11 +78,30 @@ const state = {
     error: null,
     vendor: 'VB-Audio / VB-CABLE Pack45',
     renderDeviceName: null,
-    microphoneName: null
+    microphoneName: null,
+    preferredBackend: 'micDeckVad',
+    activeBackend: 'micDeckVad',
+    activeBackendLabel: 'MicDeck VAD',
+    customDriverAvailable: false,
+    customDriverVersion: null,
+    backends: []
+  },
+  normalization: {
+    enabled: false,
+    mode: 'integrated',
+    targetLufs: -16,
+    peakCeilingDb: -1,
+    maxGainDb: 12,
+    maxAttenuationDb: 24,
+    matchMicrophone: false
   },
   microphoneNameInput: 'MicDeck Virtual Mic',
   microphoneNameDirty: false,
   isInstallingDriver: false,
+  isSwitchingBackend: false,
+  isUninstallingDriver: false,
+  testingBackend: null,
+  isAnalyzingLoudness: false,
   isRenamingMicrophone: false,
   isRestartingEngine: false,
   isRepairingDefaultMicrophone: false,
@@ -111,6 +130,7 @@ let playbackTimer = null;
 let audioSessionTimer = null;
 let toastTimer = null;
 let voiceProcessingTimer = null;
+let normalizationTimer = null;
 const sessionVolumeTimers = new Map();
 let renderedLiveId = null;
 let newestSoundIds = new Set();
@@ -144,7 +164,10 @@ const icons = {
   power: '<path d="M12 3v9M6.2 6.2a8 8 0 1 0 11.6 0"/>',
   keyboard: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M7 14h.01M10 14h7"/>',
   sparkle: '<path d="m12 3 1.3 3.7L17 8l-3.7 1.3L12 13l-1.3-3.7L7 8l3.7-1.3L12 3Z"/><path d="m18 14 .8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8L18 14Z"/>',
-  close: '<path d="m6 6 12 12M18 6 6 18"/>'
+  close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  chip: '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>',
+  levels: '<path d="M5 20V10M12 20V4M19 20v-7"/><circle cx="5" cy="7" r="2"/><circle cx="12" cy="16" r="2"/><circle cx="19" cy="10" r="2"/>',
+  ruler: '<path d="M3 12h18M6 9v6M10 10v4M14 10v4M18 9v6"/>'
 };
 
 document.documentElement.lang = state.language;
@@ -461,7 +484,7 @@ function setupCursorGlowTracking() {
 async function setupLibraryWorkerEvents() {
   await listen('library-worker-progress', ({ payload }) => {
     state.libraryWorker = payload;
-    if (state.activeView === 'library') render();
+    if (state.activeView === 'library' || state.activeView === 'levels') render();
   });
   await listen('native-runtime-ready', () => {
     refreshState().catch(() => {});
@@ -480,6 +503,7 @@ async function refreshState() {
     systemAudioEnabled,
     systemAudioGain,
     voiceProcessing,
+    normalization,
     playback,
     virtualAudio,
     nativeAudio,
@@ -496,6 +520,7 @@ async function refreshState() {
     invoke('get_system_audio_enabled'),
     invoke('get_system_audio_gain'),
     invoke('get_voice_processing_settings'),
+    invoke('get_normalization_settings'),
     invoke('get_playback_status'),
     invoke('get_virtual_audio_status'),
     invoke('get_native_audio_status'),
@@ -514,6 +539,7 @@ async function refreshState() {
     systemAudioEnabled: Boolean(systemAudioEnabled),
     systemAudioGain: Number(systemAudioGain ?? 0.85),
     voiceProcessing,
+    normalization,
     playback,
     virtualAudio,
     nativeAudio,
@@ -689,17 +715,120 @@ async function toggleSystemAudio() {
   }
 }
 
-async function installVirtualAudioDriver() {
+async function installVirtualAudioDriver(backend = null) {
   if (state.isInstallingDriver) return;
   state.isInstallingDriver = true;
   render();
   try {
-    await invoke('install_virtual_audio_driver');
+    await invoke('install_virtual_audio_driver', { backend });
     await refreshState();
   } catch (error) {
     state.isInstallingDriver = false;
     render();
     showToast(t('toast.driverFailed', { error }), 'error');
+  } finally {
+    state.isInstallingDriver = false;
+  }
+}
+
+function backendLabel(backend) {
+  return state.virtualAudio.backends.find((item) => item.backend === backend)?.label
+    ?? (backend === 'micDeckVad' ? 'MicDeck VAD' : 'VB-CABLE');
+}
+
+async function selectVirtualAudioBackend(backend) {
+  if (state.isSwitchingBackend || state.virtualAudio.preferredBackend === backend) return;
+  state.isSwitchingBackend = true;
+  render();
+  try {
+    await invoke('set_virtual_audio_backend', { backend });
+    showToast(t('toast.backendSelected', { backend: backendLabel(backend) }), 'success');
+  } catch (error) {
+    // The backend is saved even when the route cannot be configured yet, so the driver
+    // card must still show the new selection alongside the reason it is not live.
+    showToast(error, 'error');
+  } finally {
+    state.isSwitchingBackend = false;
+    await refreshState();
+  }
+}
+
+async function testVirtualAudioBackend(backend) {
+  if (state.testingBackend) return;
+  state.testingBackend = backend;
+  render();
+  try {
+    const probe = await invoke('test_virtual_audio_backend', { backend });
+    showToast(
+      t('toast.driverTested', { backend: probe.label, message: probe.message }),
+      probe.ready ? 'success' : 'error'
+    );
+  } catch (error) {
+    showToast(error, 'error');
+  } finally {
+    state.testingBackend = null;
+    await refreshState();
+  }
+}
+
+async function uninstallVirtualAudioDriver() {
+  if (state.isUninstallingDriver) return;
+  state.isUninstallingDriver = true;
+  render();
+  try {
+    await invoke('uninstall_virtual_audio_driver');
+    showToast(t('toast.driverUninstalled'), 'success');
+  } catch (error) {
+    showToast(error, 'error');
+  } finally {
+    state.isUninstallingDriver = false;
+    await refreshState();
+  }
+}
+
+async function persistNormalization() {
+  clearTimeout(normalizationTimer);
+  try {
+    state.normalization = await invoke('set_normalization_settings', {
+      settings: state.normalization
+    });
+    // The per-clip gains shown in the library come from the backend, so pull them back.
+    state.sounds = await invoke('list_sounds');
+    render();
+  } catch (error) {
+    showToast(error, 'error');
+  }
+}
+
+function updateNormalization(patch, { rerender = false, immediate = false } = {}) {
+  Object.assign(state.normalization, patch);
+  clearTimeout(normalizationTimer);
+  if (immediate) {
+    persistNormalization();
+  } else {
+    normalizationTimer = setTimeout(persistNormalization, 120);
+  }
+  if (rerender) render();
+}
+
+async function analyzeLibraryLoudness(force = false) {
+  if (state.isAnalyzingLoudness) return;
+  const pending = force
+    ? state.sounds.length
+    : state.sounds.filter((sound) => sound.loudnessLufs === null).length;
+  if (pending === 0) return;
+  state.isAnalyzingLoudness = true;
+  state.libraryWorker = { kind: 'loudness', stage: 'queued', current: 0, total: pending, fileName: null };
+  render();
+  try {
+    state.sounds = await invoke('analyze_library_loudness', { force });
+    showToast(t('toast.levelsAnalyzed', { count: pending }), 'success');
+  } catch (error) {
+    showToast(error, 'error');
+  } finally {
+    state.isAnalyzingLoudness = false;
+    state.libraryWorker = null;
+    render();
   }
 }
 
@@ -853,6 +982,8 @@ function appSidebar() {
         ${navButton('library', t('nav.library'), 'library')}
         ${navButton('studio', t('nav.studio'), 'studio')}
         ${navButton('streamer', t('nav.streamer'), 'streamer')}
+        ${navButton('levels', t('nav.levels'), 'levels')}
+        ${navButton('driver', t('nav.driver'), 'chip')}
         ${navButton('settings', t('nav.settings'), 'settings')}
       </nav>
 
@@ -1008,6 +1139,7 @@ function libraryWorkerStatus() {
     analyzing: 58,
     finalizing: 92,
     complete: 100,
+    done: 100,
     failed: 100
   };
   const itemProgress = worker.total > 0 ? (worker.current / worker.total) * 28 : 0;
@@ -1016,10 +1148,10 @@ function libraryWorkerStatus() {
 
   return `
     <section class="library-worker ${worker.stage === 'failed' ? 'has-error' : ''}" aria-live="polite">
-      <div class="worker-orbit"><span></span>${icon(worker.kind === 'url' ? 'download' : 'studio')}</div>
+      <div class="worker-orbit"><span></span>${icon({ url: 'download', loudness: 'ruler' }[worker.kind] || 'studio')}</div>
       <div class="worker-copy">
         <div class="worker-title-row">
-          <strong>${t(worker.kind === 'url' ? 'worker.captureTitle' : 'worker.filesTitle')}</strong>
+          <strong>${t({ url: 'worker.captureTitle', loudness: 'worker.loudnessTitle' }[worker.kind] || 'worker.filesTitle')}</strong>
           <span>${progress}%</span>
         </div>
         <p>${escapeHtml(t(stageKey))}${worker.fileName ? ` · ${escapeHtml(worker.fileName)}` : ''}</p>
@@ -1605,14 +1737,10 @@ function settingsView() {
             </div>
             ${icon('check', 'route-check')}
           </div>
-          <label class="field-label" for="microphone-name">${t('settings.systemName')}</label>
-          <div class="inline-field">
-            <input id="microphone-name" class="input" maxlength="80" value="${escapeHtml(state.microphoneNameInput)}" />
-            <button class="button button-primary" id="rename-microphone-btn" ${state.isRenamingMicrophone ? 'disabled' : ''}>
-              ${state.isRenamingMicrophone ? '<span class="spinner"></span>' : t('common.save')}
-            </button>
+          <div class="diagnostic-list">
+            <div><span>${t('driver.activeBackend')}</span><strong>${escapeHtml(state.virtualAudio.activeBackendLabel)}</strong></div>
+            <div><span>${t('driver.captureEndpoint')}</span><strong>${escapeHtml(microphoneName)}</strong></div>
           </div>
-          <p class="helper-text">${t('settings.systemNameHelp')}</p>
         ` : `
           <div class="setup-callout">
             ${icon('alert')}
@@ -1623,11 +1751,11 @@ function settingsView() {
                 : t('settings.installDriverHelp')))}</p>
             </div>
           </div>
-          <button class="button button-accent full-button" id="install-driver-btn" ${state.isInstallingDriver ? 'disabled' : ''}>
-            ${state.isInstallingDriver ? `<span class="spinner"></span> ${t('common.installing')}` : `${icon('download')} ${t('settings.installDriver')}`}
-          </button>
         `}
-        <div class="vendor-note">${t('settings.deviceLayer')}: ${escapeHtml(state.virtualAudio.vendor)} · <a href="https://vb-audio.com/Cable/" target="_blank" rel="noreferrer">${t('settings.donationware')}</a></div>
+        <button class="button button-accent full-button" data-goto-driver>
+          ${icon('chip')} ${t('driver.title')}
+        </button>
+        <div class="vendor-note">${t('settings.deviceLayer')}: ${escapeHtml(state.virtualAudio.vendor)}</div>
       </section>
 
       <section class="surface settings-card engine-settings">
@@ -1731,15 +1859,343 @@ function settingsView() {
   `;
 }
 
+function backendChecklist(probe) {
+  const rows = [
+    [t('driver.renderResponding'), probe.renderResponding],
+    [t('driver.captureResponding'), probe.captureResponding],
+    [t('driver.formatCompatible'), probe.formatCompatible]
+  ];
+  return `
+    <ul class="driver-checklist">
+      ${rows.map(([label, ok]) => `
+        <li class="${ok ? 'is-ok' : 'is-missing'}">${icon(ok ? 'check' : 'close')}<span>${label}</span></li>
+      `).join('')}
+    </ul>
+  `;
+}
+
+function backendCard(probe) {
+  const isPreferred = probe.backend === state.virtualAudio.preferredBackend;
+  const isActive = probe.backend === state.virtualAudio.activeBackend;
+  const isCustom = probe.backend === 'micDeckVad';
+  const blocked = isCustom && !probe.packageAvailable && !probe.installed;
+  const testing = state.testingBackend === probe.backend;
+
+  return `
+    <section class="surface driver-backend-card ${isPreferred ? 'is-preferred' : ''} ${probe.ready ? 'is-ready' : ''}">
+      <div class="surface-head">
+        <div>
+          <div class="panel-kicker">${isCustom ? 'KERNEL WAVERT' : 'THIRD PARTY'}</div>
+          <h2>${escapeHtml(probe.label)}</h2>
+        </div>
+        <span class="status-pill ${probe.ready ? 'is-good' : probe.installed ? 'is-warn' : ''}">
+          ${probe.ready ? t('common.ready') : probe.installed ? t('common.setup') : t('common.off')}
+        </span>
+      </div>
+      <p class="section-lead">${isCustom ? t('driver.own') : t('driver.thirdParty')}</p>
+
+      ${isActive ? `<div class="driver-active-flag">${icon('bolt')} ${t('driver.activeBackend')}</div>` : ''}
+
+      <div class="driver-endpoints">
+        <div>
+          <small>${t('driver.renderEndpoint')}</small>
+          <strong>${escapeHtml(probe.renderEndpoint || t('driver.notDetected'))}</strong>
+        </div>
+        <div>
+          <small>${t('driver.captureEndpoint')}</small>
+          <strong>${escapeHtml(probe.captureEndpoint || t('driver.notDetected'))}</strong>
+        </div>
+      </div>
+      ${backendChecklist(probe)}
+
+      ${blocked ? `
+        <div class="setup-callout compact">
+          ${icon('alert')}
+          <div><p>${t('driver.packageMissing')}</p></div>
+        </div>
+      ` : ''}
+      ${isCustom && probe.packageAvailable && state.virtualAudio.customDriverVersion ? `
+        <div class="vendor-note">${t('driver.packageVersion')}: ${escapeHtml(state.virtualAudio.customDriverVersion)}</div>
+      ` : ''}
+
+      <div class="driver-card-actions">
+        <button class="button ${isPreferred ? 'button-subtle' : 'button-primary'}" data-select-backend="${probe.backend}" ${isPreferred || state.isSwitchingBackend ? 'disabled' : ''}>
+          ${isPreferred ? `${icon('check')} ${t('driver.selected')}` : t('driver.select')}
+        </button>
+        <button class="button button-accent" data-install-backend="${probe.backend}" ${state.isInstallingDriver || blocked ? 'disabled' : ''}>
+          ${state.isInstallingDriver
+            ? `<span class="spinner"></span> ${t('common.installing')}`
+            : `${icon('download')} ${probe.installed ? t('driver.reinstall') : t('driver.install')}`}
+        </button>
+        <button class="button button-subtle" data-test-backend="${probe.backend}" ${testing ? 'disabled' : ''}>
+          ${testing ? `<span class="spinner"></span> ${t('driver.testing')}` : `${icon('refresh')} ${t('driver.test')}`}
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function driverView() {
+  const virtual = state.virtualAudio;
+  const probes = virtual.backends.length
+    ? virtual.backends
+    : [{
+        backend: virtual.activeBackend,
+        label: virtual.activeBackendLabel,
+        installed: virtual.installed,
+        ready: virtual.ready,
+        renderEndpoint: virtual.renderDeviceName,
+        captureEndpoint: virtual.microphoneName,
+        renderResponding: virtual.ready,
+        captureResponding: virtual.ready,
+        formatCompatible: virtual.ready,
+        packageAvailable: virtual.customDriverAvailable,
+        message: ''
+      }];
+  const mismatched = virtual.preferredBackend !== virtual.activeBackend;
+
+  return `
+    ${viewHeader(
+      t('driver.kicker'),
+      t('driver.title'),
+      t('driver.description'),
+      `<div class="latency-chip">${icon('chip')} <strong>${escapeHtml(virtual.activeBackendLabel)}</strong></div>`
+    )}
+
+    ${mismatched ? `
+      <div class="top-alert inline-alert">
+        ${icon('alert')}
+        <span>${escapeHtml(t('driver.fallbackNotice', {
+          preferred: backendLabel(virtual.preferredBackend),
+          active: backendLabel(virtual.activeBackend)
+        }))}</span>
+      </div>
+    ` : ''}
+
+    <div class="driver-grid">
+      ${probes.map(backendCard).join('')}
+    </div>
+
+    <div class="driver-lower-grid">
+      <section class="surface settings-card">
+        <div class="surface-head">
+          <div><div class="panel-kicker">VIRTUAL DEVICE</div><h2>${t('settings.virtualMicrophone')}</h2></div>
+          <span class="status-pill ${virtual.ready ? 'is-good' : 'is-warn'}">${virtual.ready ? t('common.ready') : t('common.setup')}</span>
+        </div>
+        ${virtual.ready ? `
+          <div class="device-route-card">
+            <span class="round-icon">${icon('route')}</span>
+            <div>
+              <small>${t('settings.mixOutput')}</small>
+              <strong>${escapeHtml(virtual.renderDeviceName || 'Managed cable')}</strong>
+            </div>
+            ${icon('check', 'route-check')}
+          </div>
+          <label class="field-label" for="microphone-name">${t('driver.microphoneName')}</label>
+          <div class="inline-field">
+            <input id="microphone-name" class="input" maxlength="80" value="${escapeHtml(state.microphoneNameInput)}" />
+            <button class="button button-primary" id="rename-microphone-btn" ${state.isRenamingMicrophone ? 'disabled' : ''}>
+              ${state.isRenamingMicrophone ? '<span class="spinner"></span>' : t('common.save')}
+            </button>
+          </div>
+          <p class="helper-text">${t('settings.systemNameHelp')}</p>
+        ` : `
+          <div class="setup-callout">
+            ${icon('alert')}
+            <div>
+              <strong>${t('settings.deviceInactive')}</strong>
+              <p>${escapeHtml(virtual.error || (virtual.restartRequired
+                ? t('settings.driverInstalledRestart')
+                : t('settings.installDriverHelp')))}</p>
+            </div>
+          </div>
+        `}
+        ${virtual.customDriverAvailable ? `
+          <button class="button button-subtle full-button" id="uninstall-driver-btn" ${state.isUninstallingDriver ? 'disabled' : ''}>
+            ${state.isUninstallingDriver ? `<span class="spinner"></span> ${t('driver.uninstalling')}` : `${icon('trash')} ${t('driver.uninstall')}`}
+          </button>
+        ` : ''}
+        <div class="vendor-note">${t('settings.deviceLayer')}: ${escapeHtml(virtual.vendor)}</div>
+      </section>
+
+      <section class="surface settings-card">
+        <div class="surface-head">
+          <div><div class="panel-kicker">DIAGNOSTICS</div><h2>${t('driver.diagnostics')}</h2></div>
+          <span class="status-pill ${state.nativeAudio.ready ? 'is-good' : 'is-warn'}">${state.nativeAudio.ready ? 'ONLINE' : state.nativeAudio.state.toUpperCase()}</span>
+        </div>
+        <div class="diagnostic-list">
+          <div><span>${t('driver.preferredBackend')}</span><strong>${escapeHtml(backendLabel(virtual.preferredBackend))}</strong></div>
+          <div><span>${t('driver.activeBackend')}</span><strong>${escapeHtml(virtual.activeBackendLabel)}</strong></div>
+          <div><span>${t('settings.protocol')}</span><strong>IPC v${state.nativeAudio.protocolVersion || '—'}</strong></div>
+          <div><span>${t('settings.estimatedLatency')}</span><strong>${latencyLabel()}</strong></div>
+          <div><span>XRUN / underrun</span><strong>${state.nativeAudio.underruns || 0}</strong></div>
+          <div><span>Capture overrun</span><strong>${state.nativeAudio.captureOverruns || 0}</strong></div>
+        </div>
+        ${state.nativeAudio.error ? `<div class="setup-callout compact">${icon('alert')}<div><strong>${t('settings.engineError')}</strong><p>${escapeHtml(state.nativeAudio.error)}</p></div></div>` : ''}
+        <button class="button button-subtle full-button" id="restart-engine-btn" ${state.isRestartingEngine ? 'disabled' : ''}>
+          ${state.isRestartingEngine ? `<span class="spinner"></span> ${t('common.restarting')}` : `${icon('refresh')} ${t('settings.restartEngine')}`}
+        </button>
+      </section>
+    </div>
+  `;
+}
+
+function formatLufs(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+    return '—';
+  }
+  return `${Number(value).toFixed(1)} LUFS`;
+}
+
+function loudnessSpread(sounds, applyGain) {
+  const values = sounds
+    .filter((sound) => Number.isFinite(sound.loudnessLufs))
+    .map((sound) => sound.loudnessLufs + (applyGain ? sound.normalizationGainDb : 0));
+  if (values.length < 2) return null;
+  return Math.max(...values) - Math.min(...values);
+}
+
+function loudnessBarPercent(lufs) {
+  // -40..0 LUFS mapped onto the row bar.
+  return Math.round(((Math.max(-40, Math.min(0, lufs)) + 40) / 40) * 100);
+}
+
+function normalizationRange(id, label, help, value, min, max, step, valueClass, suffix = ' dB') {
+  return `
+    <label class="gain-control">
+      <div class="gain-head">
+        <div><strong>${label}</strong><span>${help}</span></div>
+        <output class="gain-output ${valueClass}">${Number(value).toFixed(1)}${suffix}</output>
+      </div>
+      <input class="range" id="${id}" type="range" min="${min}" max="${max}" step="${step}" value="${value}" ${state.normalization.enabled ? '' : 'disabled'} />
+    </label>
+  `;
+}
+
+function levelsRow(sound) {
+  const measured = Number.isFinite(sound.loudnessLufs);
+  const gain = Number(sound.normalizationGainDb) || 0;
+  return `
+    <div class="levels-row ${measured ? '' : 'is-unmeasured'}">
+      <div class="levels-row-name">
+        <strong title="${escapeHtml(sound.name)}">${escapeHtml(sound.name.replace(/\.[^/.]+$/, ''))}</strong>
+        <small>${escapeHtml(sound.durationText)} · ${escapeHtml(sound.extension.toUpperCase())}</small>
+      </div>
+      <div class="levels-row-meter">
+        <div class="levels-track">
+          <i class="levels-measured" style="width:${measured ? loudnessBarPercent(sound.loudnessLufs) : 0}%"></i>
+          <b class="levels-target" style="left:${loudnessBarPercent(state.normalization.targetLufs)}%"></b>
+        </div>
+        <small>${measured ? formatLufs(sound.loudnessLufs) : t('levels.unmeasured')}${measured ? ` · ${t('levels.measured')} peak ${formatDb(sound.peakDbfs)}` : ''}</small>
+      </div>
+      <div class="levels-row-gain ${gain > 0 ? 'is-boost' : gain < 0 ? 'is-cut' : ''}">
+        <strong>${state.normalization.enabled && measured ? formatDb(gain) : '—'}</strong>
+        ${sound.normalizationLimited ? `<small title="${t('levels.limited')}">${icon('alert')}</small>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function levelsView() {
+  const normalization = state.normalization;
+  const pending = state.sounds.filter((sound) => !Number.isFinite(sound.loudnessLufs)).length;
+  const spreadBefore = loudnessSpread(state.sounds, false);
+  const spreadAfter = loudnessSpread(state.sounds, true);
+
+  return `
+    ${viewHeader(
+      t('levels.kicker'),
+      t('levels.title'),
+      t('levels.description'),
+      `<button class="button button-primary" id="analyze-loudness-btn" ${state.isAnalyzingLoudness || pending === 0 ? 'disabled' : ''}>
+        ${state.isAnalyzingLoudness
+          ? `<span class="spinner spinner-dark"></span> ${t('levels.analyzing')}`
+          : `${icon('ruler')} ${t('levels.analyze')}`}
+      </button>`
+    )}
+
+    ${libraryWorkerStatus()}
+
+    <div class="levels-grid">
+      <section class="surface levels-master-card ${normalization.enabled ? 'is-on' : ''}">
+        <div class="surface-head">
+          <div><div class="panel-kicker">BS.1770</div><h2>${t('levels.enable')}</h2></div>
+          <button class="toggle-switch ${normalization.enabled ? 'is-on' : ''}" id="normalization-toggle" role="switch" aria-checked="${normalization.enabled}" aria-label="${t('levels.enable')}"><i></i></button>
+        </div>
+        <p class="section-lead">${t('levels.enableDescription')}</p>
+
+        <div class="levels-mode" role="group" aria-label="${t('levels.mode')}">
+          ${[['integrated', t('levels.modeIntegrated'), t('levels.modeIntegratedHelp')],
+             ['peak', t('levels.modePeak'), t('levels.modePeakHelp')]].map(([mode, label, help]) => `
+            <button class="levels-mode-chip ${normalization.mode === mode ? 'is-active' : ''}" data-normalization-mode="${mode}" ${normalization.enabled ? '' : 'disabled'}>
+              <strong>${label}</strong>
+              <span>${help}</span>
+            </button>
+          `).join('')}
+        </div>
+
+        <div class="filter-range-stack">
+          ${normalizationRange('normalization-target-range', t('levels.target'), t('levels.targetHelp'), normalization.targetLufs, -40, -5, 0.5, 'normalization-target-value', ' LUFS')}
+          ${normalizationRange('normalization-ceiling-range', t('levels.ceiling'), t('levels.ceilingHelp'), normalization.peakCeilingDb, -12, 0, 0.5, 'normalization-ceiling-value')}
+          ${normalizationRange('normalization-maxgain-range', t('levels.maxGain'), '', normalization.maxGainDb, 0, 24, 0.5, 'normalization-maxgain-value')}
+          ${normalizationRange('normalization-maxcut-range', t('levels.maxAttenuation'), '', normalization.maxAttenuationDb, 0, 40, 0.5, 'normalization-maxcut-value')}
+        </div>
+
+        <div class="preference-row">
+          <span class="round-icon">${icon('mic')}</span>
+          <div>
+            <strong>${t('levels.matchMicrophone')}</strong>
+            <p>${t('levels.matchMicrophoneDescription')}</p>
+          </div>
+          <button class="toggle-switch ${normalization.matchMicrophone ? 'is-on' : ''}" id="normalization-mic-toggle" role="switch" aria-checked="${normalization.matchMicrophone}" aria-label="${t('levels.matchMicrophone')}" ${normalization.enabled ? '' : 'disabled'}><i></i></button>
+        </div>
+
+        ${normalization.enabled ? '' : `<div class="setup-callout compact">${icon('alert')}<div><p>${t('levels.disabledNote')}</p></div></div>`}
+      </section>
+
+      <section class="surface levels-library-card">
+        <div class="surface-head">
+          <div><div class="panel-kicker">LIBRARY</div><h2>${t('levels.libraryTitle')}</h2></div>
+          <div class="levels-head-actions">
+            ${pending > 0 ? `<span class="status-pill is-warn">${escapeHtml(t('levels.pendingCount', { count: pending }))}</span>` : ''}
+            <button class="button button-subtle" id="reanalyze-loudness-btn" ${state.isAnalyzingLoudness || state.sounds.length === 0 ? 'disabled' : ''}>
+              ${icon('refresh')} ${t('levels.reanalyze')}
+            </button>
+          </div>
+        </div>
+
+        <div class="levels-stats">
+          <div><span>${t('levels.spread')}</span><strong>${spreadBefore === null ? '—' : `${spreadBefore.toFixed(1)} LU`}</strong></div>
+          <div><span>${t('levels.spreadAfter')}</span><strong>${spreadAfter === null || !normalization.enabled ? '—' : `${spreadAfter.toFixed(1)} LU`}</strong></div>
+          <div><span>${t('levels.target')}</span><strong>${formatLufs(normalization.targetLufs)}</strong></div>
+        </div>
+
+        ${state.sounds.length ? `
+          <div class="levels-list">
+            ${state.sounds.map(levelsRow).join('')}
+          </div>
+        ` : `
+          <div class="audio-app-empty">
+            <span>${icon('library')}</span>
+            <div><p>${t('levels.empty')}</p></div>
+          </div>
+        `}
+      </section>
+    </div>
+  `;
+}
+
 function render() {
   const alert = criticalAlert();
-  const view = state.activeView === 'studio'
-    ? studioView()
-    : state.activeView === 'streamer'
-      ? streamerView()
-    : state.activeView === 'settings'
-      ? settingsView()
-      : libraryView();
+  const views = {
+    studio: studioView,
+    streamer: streamerView,
+    levels: levelsView,
+    driver: driverView,
+    settings: settingsView,
+    library: libraryView
+  };
+  const view = (views[state.activeView] ?? libraryView)();
 
   document.querySelector('#app').innerHTML = `
     <div class="app-shell ${state.cursorGlowEnabled ? 'glow-enabled' : ''}">
@@ -1777,13 +2233,56 @@ function bindEvents() {
     state.activeView = 'settings';
     render();
   });
+  document.querySelectorAll('[data-goto-driver]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeView = 'driver';
+      render();
+    });
+  });
   document.getElementById('add-btn')?.addEventListener('click', addSounds);
   document.getElementById('empty-add-btn')?.addEventListener('click', addSounds);
   document.getElementById('url-btn')?.addEventListener('click', importFromUrl);
   document.querySelectorAll('#stop-btn').forEach((button) => button.addEventListener('click', stopPlayback));
-  document.getElementById('install-driver-btn')?.addEventListener('click', installVirtualAudioDriver);
+  document.getElementById('install-driver-btn')?.addEventListener('click', () => installVirtualAudioDriver());
   document.getElementById('rename-microphone-btn')?.addEventListener('click', renameVirtualMicrophone);
   document.getElementById('restart-engine-btn')?.addEventListener('click', restartNativeAudioEngine);
+  document.getElementById('uninstall-driver-btn')?.addEventListener('click', uninstallVirtualAudioDriver);
+  document.querySelectorAll('[data-select-backend]').forEach((button) => {
+    button.addEventListener('click', () => selectVirtualAudioBackend(button.dataset.selectBackend));
+  });
+  document.querySelectorAll('[data-install-backend]').forEach((button) => {
+    button.addEventListener('click', () => installVirtualAudioDriver(button.dataset.installBackend));
+  });
+  document.querySelectorAll('[data-test-backend]').forEach((button) => {
+    button.addEventListener('click', () => testVirtualAudioBackend(button.dataset.testBackend));
+  });
+
+  document.getElementById('analyze-loudness-btn')?.addEventListener('click', () => analyzeLibraryLoudness(false));
+  document.getElementById('reanalyze-loudness-btn')?.addEventListener('click', () => analyzeLibraryLoudness(true));
+  document.getElementById('normalization-toggle')?.addEventListener('click', () => {
+    updateNormalization({ enabled: !state.normalization.enabled }, { rerender: true, immediate: true });
+  });
+  document.getElementById('normalization-mic-toggle')?.addEventListener('click', () => {
+    updateNormalization({ matchMicrophone: !state.normalization.matchMicrophone }, { rerender: true, immediate: true });
+  });
+  document.querySelectorAll('[data-normalization-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      updateNormalization({ mode: button.dataset.normalizationMode }, { rerender: true, immediate: true });
+    });
+  });
+  [
+    ['normalization-target-range', 'targetLufs', '.normalization-target-value', ' LUFS'],
+    ['normalization-ceiling-range', 'peakCeilingDb', '.normalization-ceiling-value', ' dB'],
+    ['normalization-maxgain-range', 'maxGainDb', '.normalization-maxgain-value', ' dB'],
+    ['normalization-maxcut-range', 'maxAttenuationDb', '.normalization-maxcut-value', ' dB']
+  ].forEach(([id, key, selector, suffix]) => {
+    document.getElementById(id)?.addEventListener('input', (event) => {
+      const value = Number(event.target.value);
+      const output = document.querySelector(selector);
+      if (output) output.textContent = `${value.toFixed(1)}${suffix}`;
+      updateNormalization({ [key]: value });
+    });
+  });
   document.getElementById('repair-microphone-btn')?.addEventListener('click', repairDefaultMicrophone);
   document.getElementById('system-audio-toggle')?.addEventListener('click', toggleSystemAudio);
   document.getElementById('system-audio-cta')?.addEventListener('click', toggleSystemAudio);
