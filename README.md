@@ -181,67 +181,391 @@ ring and the pipeline are covered by ordinary assertions that run in seconds.
 
 ## Project layout
 
+<table>
+<tr>
+<td width="33%" valign="top">
+
+<img src="https://img.shields.io/badge/01-FRONT%20END-c8ff63?style=flat-square&labelColor=0c0e11" alt="">
+
+#### `src/`
+
+Six views, one mutable state object, no framework and no router. `render()` rewrites the
+DOM wholesale; pollers patch the meters in place so it does not have to.
+
+`5 516` lines · `6` views · `317` strings × 2 languages
+
+<sub>JavaScript · CSS</sub>
+
+**[Open tree ↓](#tree-01)**
+
+</td>
+<td width="33%" valign="top">
+
+<img src="https://img.shields.io/badge/02-RUST%20SHELL-c8ff63?style=flat-square&labelColor=0c0e11" alt="">
+
+#### `src-tauri/`
+
+Owns state, persistence and every IPC command the webview can reach. Never touches the
+real-time path — it decodes, measures and delegates.
+
+`4 624` lines · `42` commands · `22` tests
+
+<sub>Rust · Tauri 2</sub>
+
+**[Open tree ↓](#tree-02)**
+
+</td>
+<td width="33%" valign="top">
+
+<img src="https://img.shields.io/badge/03-AUDIO%20CORE-c8ff63?style=flat-square&labelColor=0c0e11" alt="">
+
+#### `native-audio/`
+
+The real-time half: a hidden WASAPI mixer process and the shared-memory DLL both Rust
+and C++ link against.
+
+`4 110` lines · `2` binaries · `48 kHz` f32
+
+<sub>C++20 · C · Rust</sub>
+
+**[Open tree ↓](#tree-03)**
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+<img src="https://img.shields.io/badge/04-KERNEL%20DRIVER-c8ff63?style=flat-square&labelColor=0c0e11" alt="">
+
+#### `drivers/…/driver`
+
+A complete PortCls/WaveRT virtual audio device. No hardware DMA — a periodic DPC clocked
+off QPC moves bytes across a lock-free ring.
+
+`3 096` lines · `14` translation units
+
+<sub>C++20 kernel-mode · no CRT, no STL</sub>
+
+**[Open tree ↓](#tree-04)**
+
+</td>
+<td width="33%" valign="top">
+
+<img src="https://img.shields.io/badge/05-DRIVER%20TOOLKIT-c8ff63?style=flat-square&labelColor=0c0e11" alt="">
+
+#### `drivers/…/*`
+
+Everything around the `.sys`: the elevated installer, endpoint discovery, portable tests,
+certification gates and the INF.
+
+`2 319` lines · `13` scripts · `16` docs
+
+<sub>C++ · Rust · PowerShell · CMake</sub>
+
+**[Open tree ↓](#tree-05)**
+
+</td>
+<td width="33%" valign="top">
+
+<img src="https://img.shields.io/badge/06-BUILD%20%26%20DOCS-c8ff63?style=flat-square&labelColor=0c0e11" alt="">
+
+#### `scripts/` `docs/` `.github/`
+
+Portable and installer targets, the driver+app one-shot build, screenshots and CI.
+
+`183` files tracked in total
+
+<sub>Node · PowerShell · YAML</sub>
+
+**[Open tree ↓](#tree-06)**
+
+</td>
+</tr>
+</table>
+
 ```
-micdeck/
-├── src/                              Front end — vanilla JS, no framework
-│   ├── main.js                       Views, state, IPC calls, event wiring
-│   ├── i18n.js                       Polish + English copy
-│   └── styles.css                    Full design system
-│
-├── src-tauri/                        Rust shell
-│   ├── src/
-│   │   ├── lib.rs                    App state, Tauri commands, tray, hotkeys
-│   │   ├── loudness.rs               ITU-R BS.1770-4 meter (K-weighting + gating)
-│   │   ├── virtual_audio.rs          Backend detection, install, endpoint rename
-│   │   └── native_audio.rs           FFI to the C++ engine, decode + push loop
-│   ├── build.rs                      Builds the native engine, stages the driver package
-│   ├── resources/
-│   │   ├── micdeck-vad/package/      Signed driver package lands here (git-ignored)
-│   │   └── vbcable/                  Official VB-CABLE archive + SHA-256
-│   └── tauri.conf.json
-│
-├── native-audio/                     Real-time audio core
-│   ├── engine/src/                   WASAPI capture/render, mixer, session monitor
-│   ├── bridge/                       Shared-memory IPC bridge (soundboard_ipc.dll)
-│   ├── dsp/                          Rust DSP static lib (AEC3, RNNoise, dynamics)
-│   ├── protocol/                     Versioned IPC struct definitions
-│   └── selftest/                     Hardware-independent native tests
-│
-├── drivers/micdeck-vad/              Kernel-mode virtual audio driver
-│   ├── driver/src/
-│   │   ├── driver.cpp                DriverEntry, AddDevice, unload chain
-│   │   ├── adapter.cpp               Subdevice registration + physical connections
-│   │   ├── endpoint_descriptors.cpp  Pin / filter / data-range tables
-│   │   ├── miniport_wave_rt*.cpp     WaveRT miniport, stream, DPC transfer
-│   │   ├── miniport_topology.cpp     Topology miniport
-│   │   ├── virtual_cable.cpp         Ring ownership, stream state, statistics
-│   │   ├── format.cpp                KSDATAFORMAT table (constant-initialised)
-│   │   ├── audio_clock.cpp           Per-stream position clock
-│   │   ├── master_clock.cpp          QPC-anchored shared clock
-│   │   ├── property_handlers.cpp     Private KS property set (stats, latency mode)
-│   │   ├── power_management.cpp      D0/D3 transitions
-│   │   ├── guids.cpp                 The one initguid.h translation unit
-│   │   └── new_delete.cpp            Pool-tagged operator new/delete
-│   ├── shared/                       Compiles into BOTH kernel and usermode
-│   │   ├── micdeck_audio_core.*      SPSC ring, format conversion, atomics
-│   │   └── micdeck_cable_pipeline.*  Prime / fade / trim policy
-│   ├── integration/
-│   │   ├── driver-helper/            Elevated SetupAPI/DIFx installer
-│   │   ├── micdeck-native/           Endpoint discovery + reconnect controller
-│   │   └── tauri-rust/               Reference Rust bindings
-│   ├── package/MicDeckVad.inf        INF (per-subdevice interface registration)
-│   ├── tests/                        Usermode tests for the shared code
-│   ├── tools/                        vadctl, tone-probe, e2e-certifier
-│   ├── scripts/                      Build, sign, install, certification gates
-│   └── docs/                         Architecture, bring-up, security model
-│
-├── scripts/                          App build and packaging
-│   ├── build-micdeck-vad-and-app.ps1 Driver + app in one shot
-│   ├── stage-micdeck-vad-package.ps1 Verifies signatures, writes the manifest
-│   └── tauri.mjs                     Portable / installer targets
-│
-└── docs/                             Screenshots, release notes
+        01 FRONT ──▶ 02 RUST SHELL ──▶ 03 AUDIO CORE ──▶ 04 KERNEL DRIVER ──▶ Discord
+           JS            Rust               C++/WASAPI          WaveRT .sys
+                          │                                          ▲
+                          └────────── 05 DRIVER TOOLKIT ─────────────┘
+                                     install · probe · certify
 ```
+
+---
+
+<a id="tree-01"></a>
+
+<details>
+<summary><b>01 · Front end</b> &nbsp;—&nbsp; <code>src/</code> &nbsp;·&nbsp; 5 516 lines</summary>
+
+<br>
+
+```text
+src/
+├── main.js        2 600 ln   All six views, app state, IPC calls, event wiring
+├── i18n.js          692 ln   Flat PL/EN key tables, {var} interpolation, EN fallback
+└── styles.css     2 224 ln   Design tokens, every surface, meters, glow keyframes
+
+index.html                    13-line Vite entry: #app div, theme colour, module script
+vite.config.js                Port 1420 strictPort, clearScreen off so Tauri logs stay
+package.json                  Vite scripts, Tauri v2 api, autostart/dialog/shortcut
+
+README.md · README.pl.md      Structurally mirrored; headings map one-to-one
+CHANGELOG.md                  Keep-a-changelog; Unreleased plus 0.1.0
+CONTRIBUTING.md               Setup and the exact CI commands to run before a PR
+CODE_OF_CONDUCT.md            Short hand-written policy, private reporting
+SECURITY.md                   Private GHSA reporting, 72 h ack, declared scope
+THIRD_PARTY_NOTICES.md        VB-CABLE SHA-256 and terms, aec3/nnnoiseless, yt-dlp
+LICENSE                       MIT
+```
+
+> `main.js` holds one mutable `state` object and re-renders `#app` from scratch on every
+> change, rebinding listeners as it goes. The 180 ms and 700 ms pollers deliberately patch
+> meter DOM in place instead of re-rendering, which is why the UI stays smooth.
+
+</details>
+
+<a id="tree-02"></a>
+
+<details>
+<summary><b>02 · Rust shell</b> &nbsp;—&nbsp; <code>src-tauri/</code> &nbsp;·&nbsp; 4 624 lines</summary>
+
+<br>
+
+```text
+src-tauri/
+├── src/
+│   ├── lib.rs          2 498 ln   AppState, all 42 IPC commands, tray, app lifecycle
+│   ├── native_audio.rs   774 ln   libloading bridge to the DLL; spawns/kills the engine
+│   ├── virtual_audio.rs  733 ln   Backend detection and install, endpoint rename
+│   ├── loudness.rs       354 ln   ITU-R BS.1770-4 meter, K-weighting + two-stage gate
+│   └── main.rs            37 ln   Entry point; also its own elevated rename helper
+│
+├── build.rs              228 ln   Builds the C++ engine and DLL, stages the driver
+├── Cargo.toml                     cpal, rodio, tauri 2, windows 0.62
+├── tauri.conf.json                1280×820 window, strict CSP, per-user NSIS installer
+│
+├── capabilities/
+│   └── default.json               Core, autostart, dialog and global-shortcut grants
+│
+├── resources/
+│   ├── micdeck-vad/package/       Signed driver package lands here (git-ignored)
+│   └── vbcable/                   Official VB-CABLE archive + pinned SHA-256
+│
+├── examples/
+│   ├── audio_route_probe.rs       Tone out one endpoint, verify it returns on the other
+│   ├── native_probe.rs            Dumps engine status and audio sessions from the DLL
+│   └── default_input.rs           Prints the cpal default input name and raw endpoint id
+│
+└── icons/                         App and tray icons referenced by tauri.conf.json
+```
+
+> `lib.rs` folds each clip's normalisation gain into the sound-bus gain rather than
+> extending the engine ABI. `native_audio.rs` asserts the exact size and field offsets of
+> the shared structs against the C++ layout, so an ABI drift fails a test instead of
+> corrupting audio.
+
+</details>
+
+<a id="tree-03"></a>
+
+<details>
+<summary><b>03 · Audio core</b> &nbsp;—&nbsp; <code>native-audio/</code> &nbsp;·&nbsp; 4 110 lines</summary>
+
+<br>
+
+```text
+native-audio/
+├── engine/                        ──▶ soundboard_audio_engine.exe
+│   └── src/
+│       ├── audio_engine.cpp   1 536 ln   Capture/render threads, per-app loopback,
+│       │                                 DSP chain and the final mix limiter
+│       ├── audio_engine.h                WasapiCapture/WasapiRender, ProcessStreamSource
+│       ├── audio_ring_buffer.h           Header-only lock-free SPSC float ring
+│       ├── default_endpoint.cpp          Undocumented IPolicyConfig vtable: get, set and
+│       │                                 restore the default mic for all three roles
+│       ├── default_endpoint.h            Declarations for the above
+│       └── main.cpp              72 ln   Hidden-window host that runs the engine loop
+│
+├── bridge/                        ──▶ soundboard_ipc.dll
+│   ├── include/soundboard_ipc.h          Public extern "C" ABI: every sb_* export
+│   └── src/
+│       ├── soundboard_ipc.c     763 ln   Maps SbSharedState, atomic gains, SPSC push/pop
+│       └── windows_audio_control.cpp     Core Audio session poller: per-PID list, icons
+│
+├── dsp/                           ──▶ micdeck_dsp.lib, statically linked into the engine
+│   ├── src/lib.rs               175 ln   VoiceDsp: AEC3 + RNNoise on 480-frame mono,
+│   │                                     crossfaded, exposes a VAD probability
+│   ├── include/micdeck_dsp.h             C header the engine consumes
+│   └── Cargo.toml · Cargo.lock           Pinned 37-crate graph, watched by build.rs
+│
+├── protocol/
+│   └── soundboard_protocol.h             The versioned shared-memory contract itself
+│
+├── selftest/
+│   └── selftest.cpp             244 ln   Hardware-free checks: ring, limiter, bus
+│                                         selection, downmix, tone RMS
+└── README.md                             Design doc: audio contract and lifecycle
+```
+
+> The protocol header is the single source of truth shared by the DLL, the engine and the
+> Rust side. Everything else is downstream of it.
+
+</details>
+
+<a id="tree-04"></a>
+
+<details>
+<summary><b>04 · Kernel driver</b> &nbsp;—&nbsp; <code>drivers/micdeck-vad/driver</code> + <code>shared</code> &nbsp;·&nbsp; 3 096 lines</summary>
+
+<br>
+
+```text
+drivers/micdeck-vad/
+├── driver/
+│   ├── MicDeckVad.vcxproj             WDM/PortCls project; links portcls + stdunk +
+│   │                                  ksguid; NTDDI 0x0A000008 for ExAllocatePool2
+│   ├── include/
+│   │   └── micdeck_vad_public.h       The whole kernel↔usermode ABI (v3): property set
+│   │                                  GUID, stats, version and latency structs
+│   └── src/
+│       ├── common.h                   Kernel prologue: WDK includes, pool tags, tracing
+│       ├── driver.cpp                 DriverEntry, AddDevice, unload hook
+│       ├── adapter.cpp                StartDevice: 4 subdevices, 2 wave↔topology links,
+│       │                              power management registration
+│       ├── endpoint_descriptors.cpp   Four PCFILTER_DESCRIPTORs: data ranges, node
+│       │                              types, internal wiring
+│       ├── miniport_wave_rt.cpp       IMiniportWaveRT: filter, format intersection,
+│       │                              one stream per pin
+│       ├── miniport_wave_rt_stream.cpp  472 ln — the heart: MDL audio buffer, KTIMER/DPC
+│       │                              pump, KSSTATE transitions, notification events
+│       ├── miniport_topology.cpp      IMiniportTopology: render or capture filter
+│       ├── virtual_cable.cpp          8192-frame ring, PCM↔float chunking, KS stats
+│       ├── format.cpp                 KSDATAFORMAT parsing plus 5 advertised formats
+│       ├── audio_clock.cpp            Per-stream QPC clock: run/pause, byte position
+│       ├── master_clock.cpp           Adapter-wide QPC anchor, re-anchored on D0
+│       ├── property_handlers.cpp      KS property set: stats, reset, version, latency
+│       ├── power_management.cpp       IAdapterPowerManagement: flush on Dx, re-anchor D0
+│       ├── guids.cpp                  The one <initguid.h> translation unit
+│       └── new_delete.cpp             Pool-tagged operator new/delete
+│
+└── shared/                            Compiled into BOTH the .sys and the usermode tests
+    ├── micdeck_audio_core.h           MdPcmFormat, MdStereoRing, the atomics shim
+    ├── micdeck_audio_core.cpp  317 ln SPSC ring + PCM16/24/32/float codecs
+    ├── micdeck_cable_pipeline.h       MdCablePolicy per latency mode, pipeline state
+    └── micdeck_cable_pipeline.cpp     Prime / fade / stale-trim over the ring
+```
+
+**Three things that look odd and are load-bearing:**
+
+| | |
+| --- | --- |
+| `guids.cpp` | 12 lines, 10 of them comment. `DEFINE_GUID` only allocates storage in the one translation unit that includes `<initguid.h>` first — without this file every PortCls CLSID is an unresolved external. |
+| `shared/` | Compiles in kernel *and* usermode, so no CRT, no STL container and no exceptions may appear here. `_KERNEL_MODE` picks `volatile LONG` + `Interlocked*`; usermode gets `std::atomic` wrappers of identical layout. |
+| `constinit` in `adapter.cpp` | Kernel drivers never run C++ dynamic initialisers. The keyword turns "this static would silently be garbage at boot" into a compile error. |
+
+</details>
+
+<a id="tree-05"></a>
+
+<details>
+<summary><b>05 · Driver toolkit</b> &nbsp;—&nbsp; installer, probes, tests, gates &nbsp;·&nbsp; 2 319 lines</summary>
+
+<br>
+
+```text
+drivers/micdeck-vad/
+├── integration/
+│   ├── driver-helper/                 The only elevated component
+│   │   ├── main.cpp                   status / install / repair / uninstall, prints one
+│   │   │                              JSON result; fixed operations, no free-form args
+│   │   ├── helper_protocol.h          Exit codes and the JSON contract
+│   │   └── *.vcxproj                  Links newdev, setupapi, cfgmgr32
+│   │
+│   ├── micdeck-native/                C++ the audio engine links against
+│   │   ├── micdeck_vad_endpoint.cpp   MMDevice probe for both endpoints; matches the
+│   │   │                              INF-provided interface name, not the friendly one
+│   │   └── micdeck_vad_reconnect.cpp  Backoff reconnect thread, COM-initialised,
+│   │                                  condvar-woken so Stop() returns immediately
+│   │
+│   └── tauri-rust/                    Standalone crate: a driver service layer
+│       ├── src/package.rs             Verifies files exist and SHA-256 match before
+│       │                              anything elevates
+│       ├── src/helper.rs              Spawns the helper, parses its JSON
+│       ├── src/model.rs               DriverState / DriverStatus / DriverError
+│       └── src/sha256.rs              Dependency-free SHA-256, forbid(unsafe_code)
+│
+├── package/
+│   ├── MicDeckVad.inf                 Root-enumerated MEDIA INF: service, 10 KS
+│   │                                  interfaces registered per subdevice, endpoint names
+│   └── driver-manifest.example.json   Shape the Rust verifier expects
+│
+├── tests/
+│   ├── core_tests.cpp                 Ring push/pop/wrap/overflow, PCM roundtrip,
+│   │                                  200k-frame SPSC stress
+│   ├── pipeline_tests.cpp             Priming, stale trim, fade, stop-clear, the
+│   │                                  flush-strand regression, mode change
+│   └── CMakeLists.txt                 /UNDEBUG keeps the asserts live
+│
+├── tools/
+│   ├── vadctl/                        CLI over the KS property set: stats, latency mode
+│   ├── tone-probe/                    Plays a tone into the cable and measures it back
+│   └── e2e-certifier/                 End-to-end audio path certification
+│
+├── scripts/
+│   ├── driver-syntax.cmd              Fast /kernel cl.exe compile, no WDK MSBuild
+│   ├── driver-link.cmd                Link gate; LNK4210 catches static initialisers
+│   ├── build-portable-tests.cmd       Builds and runs the two usermode test binaries
+│   ├── build.ps1                      The real WDK MSBuild driver build
+│   ├── make-release-package.ps1       InfVerif + Inf2Cat, writes the SHA-256 manifest
+│   ├── full-wdk-certification-gate.ps1  Everything: build, sign, verify, certify
+│   ├── run-e2e-certification.ps1      CMake-builds the certifier, then runs it
+│   ├── bootstrap-official-reference.ps1  Pins a MS driver-samples commit for comparison
+│   ├── install-test.ps1 · uninstall.ps1  Test-signed install / removal
+│   └── test-core.ps1 · run-portable-tests.{ps1,sh}
+│
+├── docs/                              16 documents: architecture, bring-up runbook,
+│                                      certification levels, security model, known gaps
+├── VALIDATION.json · VALIDATION_V3.json  Self-audits that state plainly what was NOT run
+└── .github/workflows/                 Portable tests on win+ubuntu; a job that greps for
+                                       leaked .sys/.pfx/private keys
+```
+
+</details>
+
+<a id="tree-06"></a>
+
+<details>
+<summary><b>06 · Build &amp; docs</b> &nbsp;—&nbsp; <code>scripts/</code> <code>docs/</code> <code>.github/</code></summary>
+
+<br>
+
+```text
+scripts/
+├── tauri.mjs                      Wraps the Tauri CLI: portable, installer, all
+├── build-micdeck-vad-and-app.ps1  Driver, signed package and app in one shot
+├── stage-micdeck-vad-package.ps1  Verifies kernel signatures, writes driver-manifest.json
+├── build.bat · install-tools.bat  Convenience wrappers for a cold machine
+└── diagnose.sh                    Runs the native selftest and reports the audio route
+
+docs/
+├── micdeck-library.png            Library: pads, hotkeys, Quick Capture
+├── micdeck-studio.png             Studio: live mixer, system audio broadcast
+├── micdeck-streamer.png           Streamer: calibration and level match
+├── micdeck-levels.png             Levels: BS.1770 normalisation, 18.9 LU → 0.2 LU
+├── micdeck-driver.png             Driver: both backends with per-endpoint diagnostics
+├── micdeck-settings.png           Settings: engine, Windows integration, guides
+├── social-preview.svg/.png        Repository social card
+└── releases/                      Per-version release notes
+
+.github/
+├── workflows/ci.yml               windows-latest: npm audit, build, fmt, test, clippy
+├── ISSUE_TEMPLATE/                Bug and feature forms that ask for engine diagnostics
+├── PULL_REQUEST_TEMPLATE.md
+└── dependabot.yml
+```
+
+</details>
 
 ## Build from source
 
